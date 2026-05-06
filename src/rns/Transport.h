@@ -295,12 +295,14 @@ private:
     void handle_link_data_forward(Interface* received_on, const Packet& packet);
 
     // Apply §12.2.1/2 wire transformation per the path entry's hops
-    // value and emit on path.receiving_interface. Returns the
-    // outbound interface used, or nullptr if the packet wasn't
-    // forwarded (no path / missing next_hop / etc.). Caller is
-    // responsible for any post-emit table write (reverse_table for
-    // DATA, link_table for LINKREQUEST).
-    Interface* relay_forward_via_path(const Packet& packet, const PathEntry& path);
+    // value. Returns the outbound interface and the bytes ready to
+    // emit. Returns std::nullopt if the wire couldn't be built
+    // (path.hops==0 local, missing next_hop, no outbound iface).
+    // Caller emits via outbound_if->transmit_now(wire) and may
+    // mutate `wire` first (e.g. §6.6 MTU clamp on LINKREQUEST).
+    struct RelayForward { Interface* outbound_if; Bytes wire; };
+    std::optional<RelayForward> compute_relay_forward(const Packet& packet,
+                                                      const PathEntry& path);
 
     // §4.5 step 6.1 — record a freshly-validated announce's pubkey,
     // and update the path entry (timestamp / hops / next_hop /

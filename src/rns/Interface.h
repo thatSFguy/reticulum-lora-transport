@@ -45,6 +45,14 @@ public:
         float    announce_cap_pct     = DEFAULT_ANNOUNCE_CAP_PCT;
         size_t   max_queued_announces = DEFAULT_MAX_QUEUED_ANNOUNCES;
         uint64_t airtime_window_ms    = DEFAULT_AIRTIME_WINDOW_MS;
+
+        // §6.6 / §12.2.4 — Hardware MTU in bytes, used by the
+        // LINKREQUEST forward path to clamp the requested link MTU
+        // when it exceeds what this interface can carry. Default
+        // UINT32_MAX = "no clamp" (preserves existing test behaviour
+        // where signalling is forwarded as-is). Real LoRa interfaces
+        // typically set this to ~508 (RNS Reticulum.MTU constant).
+        uint32_t hw_mtu_bytes         = 0xFFFFFFFFu;
     };
 
     explicit Interface(const Config& cfg);
@@ -74,6 +82,10 @@ public:
     bool   has_pending_announce() const { return !_queue.empty(); }
     size_t queue_depth()          const { return _queue.size(); }
     uint64_t airtime_used_ms_in_window(uint64_t now_ms);
+
+    // §6.6 — used by Transport's LINKREQUEST forward to clamp link
+    // MTU signalling when this interface is the outbound hop.
+    uint32_t hw_mtu_bytes() const { return _cfg.hw_mtu_bytes; }
 
 protected:
     // Derived classes (LoraInterface, etc.) push these bytes onto the

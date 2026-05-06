@@ -997,6 +997,95 @@ void test_link_request_forward_last_hop() {
     TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH, entry->dst_hash.to_hex().c_str());
 }
 
+// §6.6 / §12.2.4 — when the outbound interface's hw_mtu is smaller
+// than the LINKREQUEST's signalled MTU, the relay rewrites the
+// signalling in place. Mode bits preserved; only the 21-bit MTU
+// field clamps.
+void test_link_request_signalling_mtu_clamped_to_outbound_iface() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+
+    // out_iface has a tight HW_MTU — 250 bytes — vs the request's 500.
+    StubInterface in_iface;
+    Interface::Config out_cfg;
+    out_cfg.bitrate_bps   = 1'000'000;
+    out_cfg.airtime_window_ms = 1000;
+    out_cfg.announce_cap_pct  = 100.0f;
+    out_cfg.hw_mtu_bytes  = 250;
+    class TightOutIface : public Interface {
+    public:
+        explicit TightOutIface(const Config& c) : Interface(c) {}
+        std::vector<Bytes> emitted;
+    protected:
+        void on_transmit(const Bytes& w) override { emitted.push_back(w); }
+    } out_iface(out_cfg);
+
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // Alice on out_iface, 1 hop away (HEADER_1 announce → post-bump 1).
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    // Synthesize a LINKREQUEST with signalling encoding mode=1
+    // (AES256_CBC) + mtu=500. signalling = 0x20 0x01 0xf4 — same as
+    // the links.json vector.
+    Bytes body;
+    body.append(Bytes(32));                           // init_x25519_pub
+    body.append(Bytes(32));                           // init_ed25519_pub
+    body.append(Bytes::from_hex("2001f4"));           // signalling: mode=1, mtu=500
+    Bytes lr_wire = Packet::pack_header_2(
+        LR_HEADER_2_FLAGS, /*hops=*/0,
+        t.local_identity().identity_hash(), alice_dest,
+        Packet::CONTEXT_NONE, body);
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    t.inbound(&in_iface, lr_wire, /*now_ms=*/2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_requests_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+
+    // Forward came out as HEADER_1 broadcast (path.hops=1 → §12.2.2).
+    Packet emitted = Packet::from_wire_bytes(out_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_1);
+
+    // Body should still be 67 bytes (signalling preserved). Last 3
+    // bytes = clamped signalling. mtu=250 → 0x0000fa, mode=1 stays.
+    // byte0 = 0x20 | (250 >> 16 & 0x1F) = 0x20 | 0 = 0x20.
+    // byte1 = (250 >> 8) & 0xFF = 0.
+    // byte2 = 250 & 0xFF = 0xfa.
+    TEST_ASSERT_EQUAL_UINT(67, emitted.data().size());
+    Bytes signalling = emitted.data().slice(64, 3);
+    TEST_ASSERT_EQUAL_STRING("2000fa", signalling.to_hex().c_str());
+}
+
+// §6.6 — when the outbound interface's hw_mtu is >= the requested
+// MTU, signalling stays untouched.
+void test_link_request_signalling_not_clamped_when_iface_larger() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;  // default hw_mtu = UINT32_MAX
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+
+    Bytes body;
+    body.append(Bytes(32));
+    body.append(Bytes(32));
+    body.append(Bytes::from_hex("2001f4"));  // mode=1, mtu=500
+    Bytes lr_wire = Packet::pack_header_2(
+        LR_HEADER_2_FLAGS, 0, t.local_identity().identity_hash(),
+        Bytes::from_hex(ALICE_DEST_HASH), Packet::CONTEXT_NONE, body);
+
+    out_iface.emitted.clear();
+    t.inbound(&in_iface, lr_wire, 2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+    Packet emitted = Packet::from_wire_bytes(out_iface.emitted[0]);
+    Bytes signalling = emitted.data().slice(64, 3);
+    TEST_ASSERT_EQUAL_STRING("2001f4", signalling.to_hex().c_str());  // unchanged
+}
+
 // §12.2.4 + §12.2.1 — multi-hop LINKREQUEST forward: path.hops > 1
 // keeps HEADER_2 and replaces transport_id with path.next_hop.
 void test_link_request_forward_multi_hop() {
@@ -1655,6 +1744,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_path_request_dedup_by_target_and_tag);
     RUN_TEST(test_path_request_transport_mode_payload_parses);
     RUN_TEST(test_link_request_forward_last_hop);
+    RUN_TEST(test_link_request_signalling_mtu_clamped_to_outbound_iface);
+    RUN_TEST(test_link_request_signalling_not_clamped_when_iface_larger);
     RUN_TEST(test_link_request_forward_multi_hop);
     RUN_TEST(test_link_proof_validates_and_forwards);
     RUN_TEST(test_link_proof_bad_signature_rejected);

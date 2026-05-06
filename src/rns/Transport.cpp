@@ -256,24 +256,54 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
     }
 }
 
-Interface* Transport::relay_forward_via_path(const Packet& packet,
-                                             const PathEntry& path) {
-    if (!path.receiving_interface) return nullptr;
+std::optional<Transport::RelayForward>
+Transport::compute_relay_forward(const Packet& packet, const PathEntry& path) {
+    if (!path.receiving_interface) return std::nullopt;
     const uint8_t remaining = path.hops;
     if (remaining > 1) {
         // §12.2.1 — replace transport_id with path.next_hop.
-        if (path.next_hop.size() != Packet::TRANSPORT_ID_LEN) return nullptr;
+        if (path.next_hop.size() != Packet::TRANSPORT_ID_LEN) return std::nullopt;
         Packet forwarded = packet.replace_transport_id(path.next_hop);
-        path.receiving_interface->transmit_now(forwarded.wire_bytes());
-        return path.receiving_interface;
+        return RelayForward{ path.receiving_interface, forwarded.wire_bytes() };
     }
     if (remaining == 1) {
         // §12.2.2 — strip transport_id, broadcast HEADER_1.
         Packet forwarded = packet.strip_transport_id_to_header_1();
-        path.receiving_interface->transmit_now(forwarded.wire_bytes());
-        return path.receiving_interface;
+        return RelayForward{ path.receiving_interface, forwarded.wire_bytes() };
     }
-    return nullptr;  // §12.2.3 local — caller handles
+    return std::nullopt;  // §12.2.3 local — caller handles
+}
+
+// §6.6 — when forwarding a LINKREQUEST whose body carries a 3-byte
+// signalling tail (body == 67 bytes), and the outbound interface's
+// hw_mtu_bytes is smaller than the encoded MTU, rewrite the
+// signalling in place. Mode bits are preserved; only the 21-bit
+// MTU field is clamped. Spec §6.6.3 explicitly notes the rewrite
+// happens in place on the wire — link_id derivation strips the
+// signalling per §6.3, so it stays invariant.
+static void maybe_clamp_lr_signalling(Bytes& wire, uint32_t hw_mtu_bytes) {
+    constexpr size_t LINK_MTU_SIZE = 3;
+    constexpr size_t ECPUBSIZE     = 64;
+    std::optional<Packet> parsed;
+    try {
+        parsed = Packet::from_wire_bytes(wire);
+    } catch (const std::invalid_argument&) {
+        return;
+    }
+    if (parsed->data().size() != ECPUBSIZE + LINK_MTU_SIZE) return;  // no signalling
+
+    const size_t off = wire.size() - LINK_MTU_SIZE;
+    const uint32_t signalled_mtu =
+        (((static_cast<uint32_t>(wire[off    ]) << 16)
+        |  (static_cast<uint32_t>(wire[off + 1]) <<  8)
+        |   static_cast<uint32_t>(wire[off + 2])) & 0x1FFFFFu);
+    if (signalled_mtu <= hw_mtu_bytes) return;
+
+    const uint8_t  mode_bits = wire[off] & 0xE0;             // top 3 bits
+    const uint32_t clamped   = hw_mtu_bytes & 0x1FFFFFu;
+    wire[off]     = mode_bits | static_cast<uint8_t>((clamped >> 16) & 0x1Fu);
+    wire[off + 1] = static_cast<uint8_t>((clamped >>  8) & 0xFFu);
+    wire[off + 2] = static_cast<uint8_t>( clamped        & 0xFFu);
 }
 
 void Transport::handle_data_forward(Interface* received_on, const Packet& packet,
@@ -297,8 +327,9 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
         return;
     }
 
-    Interface* outbound_if = relay_forward_via_path(packet, *path);
-    if (!outbound_if) return;
+    auto fwd = compute_relay_forward(packet, *path);
+    if (!fwd) return;
+    fwd->outbound_if->transmit_now(fwd->wire);
 
     if (path->hops > 1) _stats.data_forwarded_header_2++;
     else                _stats.data_forwarded_header_1++;
@@ -307,7 +338,7 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
     ReverseEntry entry;
     entry.packet_hash  = dedup_hash(packet).slice(0, 16);
     entry.received_if  = received_on;
-    entry.outbound_if  = outbound_if;
+    entry.outbound_if  = fwd->outbound_if;
     entry.timestamp_ms = now_ms;
     _reverse_table.put(std::move(entry));
 }
@@ -458,8 +489,15 @@ void Transport::handle_link_request_forward(Interface* received_on,
     if (!path) return;
     if (path->hops == 0) return;  // local responder — TBD
 
-    Interface* outbound_if = relay_forward_via_path(packet, *path);
-    if (!outbound_if) return;
+    auto fwd = compute_relay_forward(packet, *path);
+    if (!fwd) return;
+
+    // §6.6 / §12.2.4 — clamp signalling MTU in place if the outbound
+    // interface can't carry the requested value. Done BEFORE emit so
+    // the responder receives the clamped form and signs over it in
+    // LRPROOF (§6.6.5).
+    maybe_clamp_lr_signalling(fwd->wire, fwd->outbound_if->hw_mtu_bytes());
+    fwd->outbound_if->transmit_now(fwd->wire);
 
     // §12.2.4 — write link_table entry keyed by §6.3 link_id. The
     // hashable_part for the link_id is computed from the packet as
@@ -470,7 +508,7 @@ void Transport::handle_link_request_forward(Interface* received_on,
     entry.link_id          = link_id_from_lr_packet(packet);
     entry.timestamp_ms     = now_ms;
     entry.next_hop_id      = path->next_hop;        // toward responder
-    entry.nh_if            = outbound_if;
+    entry.nh_if            = fwd->outbound_if;
     entry.rem_hops         = (path->hops > 0) ? path->hops - 1 : 0;
     entry.rcvd_if          = received_on;
     entry.taken_hops       = packet.hops();
