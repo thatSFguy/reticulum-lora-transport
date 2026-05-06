@@ -143,8 +143,16 @@ void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
         // hops byte was already incremented at inbound() entry per
         // §2.4; the cached announce_wire reflects the post-bump
         // value, so we re-emit it as-is.
+        //
+        // We DO re-emit on the receiving interface. LoRa is a
+        // broadcast medium where the relay's whole purpose is to
+        // re-emit on the same physical interface to extend reach
+        // beyond the originator's direct radio range. Loop
+        // protection comes from §13.4 hashlist dedup + §12.3.2
+        // random_blob replay defence (both run in inbound() before
+        // an announce ever reaches this queue), and self-announces
+        // are filtered by identity match (§9.5).
         for (Interface* iface : _interfaces) {
-            if (iface == entry.received_from) continue;  // don't echo back
             iface->queue_announce(entry.announce_wire, entry.announce_hops);
         }
         _stats.announces_rebroadcast++;

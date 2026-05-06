@@ -356,9 +356,14 @@ void test_leaf_does_not_rebroadcast() {
     TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
 }
 
-// §12.3 — relay rebroadcasts on every interface except `received_from`,
-// with the hops byte incremented per §2.4.
-void test_relay_rebroadcasts_on_other_interfaces() {
+// §12.3 — relay rebroadcasts on EVERY registered interface, including
+// the one the announce arrived on. LoRa is a broadcast medium where
+// re-emitting on the receiving interface is the whole point of being
+// a relay (peers in different range pockets need it). Loop protection
+// is the §13.4 hashlist + §12.3.2 random_blob replay defence, both
+// run in inbound() before the announce reaches this queue. Hops byte
+// is incremented per §2.4.
+void test_relay_rebroadcasts_on_all_interfaces() {
     Transport t(bob_identity(), /*transport_enabled=*/true);
     StubInterface in_iface, out_iface;
     t.register_interface(&in_iface);
@@ -375,8 +380,9 @@ void test_relay_rebroadcasts_on_other_interfaces() {
     TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_rebroadcast);
     TEST_ASSERT_TRUE(t.announce_table().empty());  // single-shot
 
-    // Rebroadcast went to out_iface only (received_from filter).
-    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    // Rebroadcast went to BOTH interfaces — including the receiving
+    // one. The §13.4 / §12.3.2 dedup gates handle loop prevention.
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
     TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
 
     // §2.4 — hops byte incremented on the wire we just emitted.
@@ -1832,9 +1838,13 @@ void test_path_replacement_more_hops_older_timestamp_kept() {
     TEST_ASSERT_EQUAL_UINT(2, path->random_blobs.size());
 }
 
-// Single-interface relay node. Receives an announce on its only
-// interface. Rebroadcast must NOT echo back — emitted stays at 0.
-void test_relay_with_single_interface_does_not_echo() {
+// Single-interface relay node (the deployment topology — one LoRa
+// radio per node). Receives an announce on its only interface. The
+// rebroadcast MUST go back out on that same interface — that's how
+// relays extend reach on a broadcast medium. Loop prevention is the
+// §13.4 hashlist + §12.3.2 random_blob defence, both already exercised
+// in the dedup tests above.
+void test_relay_with_single_interface_re_emits() {
     Transport t(bob_identity(), /*transport_enabled=*/true);
     StubInterface iface;
     t.register_interface(&iface);
@@ -1843,7 +1853,7 @@ void test_relay_with_single_interface_does_not_echo() {
     t.tick(1000);
 
     TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_rebroadcast);
-    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());  // single-iface, no echo
+    TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());  // re-emit on the receiving interface
 }
 
 int main(int argc, char** argv) {
@@ -1858,7 +1868,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_tampered_announce_is_rejected);
     RUN_TEST(test_tick_evicts_expired_paths);
     RUN_TEST(test_leaf_does_not_rebroadcast);
-    RUN_TEST(test_relay_rebroadcasts_on_other_interfaces);
+    RUN_TEST(test_relay_rebroadcasts_on_all_interfaces);
     RUN_TEST(test_path_response_announce_does_not_rebroadcast);
     RUN_TEST(test_relay_does_not_rebroadcast_random_blob_replay);
     RUN_TEST(test_data_forward_last_hop_strips_transport_id);
@@ -1909,6 +1919,6 @@ int main(int argc, char** argv) {
     RUN_TEST(test_path_replacement_equal_or_fewer_hops_always_replaces);
     RUN_TEST(test_path_replacement_more_hops_newer_timestamp_replaces);
     RUN_TEST(test_path_replacement_more_hops_older_timestamp_kept);
-    RUN_TEST(test_relay_with_single_interface_does_not_echo);
+    RUN_TEST(test_relay_with_single_interface_re_emits);
     return UNITY_END();
 }
