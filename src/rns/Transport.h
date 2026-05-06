@@ -90,6 +90,11 @@ public:
     // identically.
     static Bytes link_id_from_lr_packet(const Packet& packet);
 
+    // §6.7.2 — validated link aging threshold. Default 10 minutes
+    // matches RNS Link.LINK_TIMEOUT order-of-magnitude. tick() calls
+    // _link_table.evict_stale with this threshold.
+    static constexpr uint64_t LINK_STALE_THRESHOLD_MS = 10ULL * 60ULL * 1000ULL;
+
     // Periodic driver. Walks each registered interface's `tick()`,
     // evicts path entries past their `expires_ms`, and purges the
     // hashlist if over cap (§13.4).
@@ -253,11 +258,6 @@ private:
     //   == 0 → §12.2.3 local destination (deferred)
     void handle_data_forward(Interface* received_on, const Packet& packet,
                              uint64_t now_ms);
-
-    // §6.7.2 — validated link aging threshold. Default 10 minutes
-    // matches RNS Link.LINK_TIMEOUT order-of-magnitude. tick() calls
-    // _link_table.evict_stale with this threshold.
-    static constexpr uint64_t LINK_STALE_THRESHOLD_MS = 10ULL * 60ULL * 1000ULL;
 
     // §12.5.3 — PROOF receipt forwarding via reverse_table. Pops the
     // entry keyed by packet.destination_hash() (= truncated hash of
