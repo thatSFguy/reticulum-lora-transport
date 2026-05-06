@@ -3,6 +3,7 @@
 #include <SHA256.h>
 #include <Ed25519.h>
 #include <Curve25519.h>
+#include <HKDF.h>
 
 #include <cstring>
 #include <stdexcept>
@@ -88,6 +89,25 @@ Bytes x25519_shared_secret(const Bytes& priv, const Bytes& peer_pub) {
         throw std::runtime_error("x25519_shared_secret: peer_pub is a weak point");
     }
     return ss;
+}
+
+Bytes hkdf_sha256(const Bytes& ikm, const Bytes& salt,
+                  const Bytes& info, size_t length) {
+    // rweather/Crypto's HKDF naming is mildly confusing: setKey() does
+    // the RFC 5869 *extract* step (PRK = HMAC-SHA256(salt, IKM)), and
+    // extract() does the *expand* step (T(i) = HMAC(PRK, T(i-1)||info||i)).
+    HKDF<SHA256> kdf;
+    kdf.setKey(ikm.data(), ikm.size(), salt.data(), salt.size());
+    Bytes out(length);
+    kdf.extract(out.data(), length, info.data(), info.size());
+    return out;
+}
+
+Bytes link_session_key(const Bytes& my_x25519_priv,
+                       const Bytes& peer_x25519_pub,
+                       const Bytes& link_id) {
+    Bytes shared = x25519_shared_secret(my_x25519_priv, peer_x25519_pub);
+    return hkdf_sha256(shared, link_id, /*info=*/Bytes{}, /*length=*/64);
 }
 
 } } // namespace rns::crypto
