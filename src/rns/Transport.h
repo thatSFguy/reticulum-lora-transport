@@ -254,6 +254,11 @@ private:
     void handle_data_forward(Interface* received_on, const Packet& packet,
                              uint64_t now_ms);
 
+    // §6.7.2 — validated link aging threshold. Default 10 minutes
+    // matches RNS Link.LINK_TIMEOUT order-of-magnitude. tick() calls
+    // _link_table.evict_stale with this threshold.
+    static constexpr uint64_t LINK_STALE_THRESHOLD_MS = 10ULL * 60ULL * 1000ULL;
+
     // §12.5.3 — PROOF receipt forwarding via reverse_table. Pops the
     // entry keyed by packet.destination_hash() (= truncated hash of
     // the original DATA packet, populated when we forwarded it),
@@ -287,13 +292,18 @@ private:
     // known long-term Ed25519 public key, forwards on rcvd_if, and
     // marks `validated = true`. Failure modes drop without
     // consuming the link_table entry — peek-then-pop discipline
-    // (see memory: table_peek_then_pop_pattern).
-    void handle_link_proof_forward(Interface* received_on, const Packet& packet);
+    // (see memory: table_peek_then_pop_pattern). now_ms is recorded
+    // as the link's last_activity for §6.7.2 aging.
+    void handle_link_proof_forward(Interface* received_on, const Packet& packet,
+                                   uint64_t now_ms);
 
     // §12.5.2 — Link DATA forwarding. Bidirectional: forwards on
     // nh_if when the packet arrived on rcvd_if, and vice versa. Skips
-    // unvalidated links (LRPROOF hasn't completed yet).
-    void handle_link_data_forward(Interface* received_on, const Packet& packet);
+    // unvalidated links (LRPROOF hasn't completed yet). Updates the
+    // link's last_activity_ms so §6.7.2 aging counts from the most
+    // recent traffic, not just from link establishment.
+    void handle_link_data_forward(Interface* received_on, const Packet& packet,
+                                  uint64_t now_ms);
 
     // Apply §12.2.1/2 wire transformation per the path entry's hops
     // value. Returns the outbound interface and the bytes ready to

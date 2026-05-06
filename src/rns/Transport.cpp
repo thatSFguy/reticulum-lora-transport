@@ -120,6 +120,7 @@ void Transport::tick(uint64_t now_ms) {
     _paths.evict_expired(now_ms);
     _reverse_table.evict_aged(now_ms);
     _link_table.evict_unproven(now_ms);
+    _link_table.evict_stale(now_ms, LINK_STALE_THRESHOLD_MS);
     _hashlist.purge_if_over_cap();
     _pr_tags.purge_if_over_cap();
 }
@@ -179,7 +180,7 @@ void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_
         if (packet.destination_hash() == path_request_destination_hash()) {
             handle_path_request(received_on, packet);
         } else if (packet.destination_type() == Packet::DestinationType::LINK) {
-            handle_link_data_forward(received_on, packet);
+            handle_link_data_forward(received_on, packet, now_ms);
         } else {
             handle_data_forward(received_on, packet, now_ms);
         }
@@ -187,7 +188,7 @@ void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_
         handle_link_request_forward(received_on, packet, now_ms);
     } else if (packet.packet_type() == Packet::PacketType::PROOF) {
         if (packet.context() == Packet::CONTEXT_LRPROOF) {
-            handle_link_proof_forward(received_on, packet);
+            handle_link_proof_forward(received_on, packet, now_ms);
         } else {
             handle_proof_forward(received_on, packet);
         }
@@ -542,12 +543,14 @@ void Transport::handle_link_request_forward(Interface* received_on,
     // Un-validated entries age out via tick(). 60s default matches
     // upstream Link.LINK_ESTABLISHMENT_TIMEOUT order-of-magnitude.
     entry.proof_timeout_ms = now_ms + 60ULL * 1000ULL;
+    entry.last_activity_ms = now_ms;
     _link_table.put(std::move(entry));
     _stats.link_requests_forwarded++;
 }
 
 void Transport::handle_link_proof_forward(Interface* received_on,
-                                          const Packet& packet) {
+                                          const Packet& packet,
+                                          uint64_t now_ms) {
     // packet.destination_hash() carries the link_id (§6.2 — LRPROOF's
     // dest_hash IS the link_id, unlike opportunistic-DATA PROOFs).
     const LinkEntry* entry = _link_table.get(packet.destination_hash());
@@ -604,14 +607,18 @@ void Transport::handle_link_proof_forward(Interface* received_on,
     fwd->transmit_now(packet.wire_bytes());
     _stats.link_proofs_forwarded++;
 
-    // Mark validated — subsequent Link DATA forwards either way.
+    // Mark validated and refresh activity — subsequent Link DATA
+    // forwards either way, and §6.7.2 staleness counts from the most
+    // recent traffic.
     if (LinkEntry* mut = _link_table.get_mut(packet.destination_hash())) {
-        mut->validated = true;
+        mut->validated        = true;
+        mut->last_activity_ms = now_ms;
     }
 }
 
 void Transport::handle_link_data_forward(Interface* received_on,
-                                         const Packet& packet) {
+                                         const Packet& packet,
+                                         uint64_t now_ms) {
     const LinkEntry* entry = _link_table.get(packet.destination_hash());
     if (!entry) {
         _stats.link_data_unknown_link++;
@@ -631,6 +638,13 @@ void Transport::handle_link_data_forward(Interface* received_on,
 
     fwd->transmit_now(packet.wire_bytes());
     _stats.link_data_forwarded++;
+
+    // §6.7.2 — refresh activity so this validated link's staleness
+    // counter resets. KEEPALIVE traffic (context 0xFA) flows through
+    // this same path, so it implicitly resets the timer.
+    if (LinkEntry* mut = _link_table.get_mut(packet.destination_hash())) {
+        mut->last_activity_ms = now_ms;
+    }
 
     // §6.7.3 — LINKCLOSE tears down the link. The relay can't read
     // the encrypted body but it can see the context byte. After

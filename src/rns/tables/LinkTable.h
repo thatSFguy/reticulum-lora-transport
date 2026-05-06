@@ -41,6 +41,10 @@ struct LinkEntry {
     Bytes      dst_hash;                // 16 bytes — responder's destination_hash
     bool       validated         = false;
     uint64_t   proof_timeout_ms  = 0;
+    // §6.7.2 — last time we forwarded any traffic on this link
+    // (LRPROOF, Link DATA, KEEPALIVE). evict_stale drops validated
+    // entries whose last_activity is too old.
+    uint64_t   last_activity_ms  = 0;
 };
 
 class LinkTable {
@@ -53,9 +57,16 @@ public:
     bool remove(const Bytes& link_id);
 
     // Drop entries past `proof_timeout_ms` (un-validated only —
-    // validated links are kept until LINKCLOSE or higher-level link
-    // aging policy lands). Returns count removed.
+    // validated links are kept until LINKCLOSE or §6.7.2 staleness
+    // aging via evict_stale). Returns count removed.
     size_t evict_unproven(uint64_t now_ms);
+
+    // §6.7.2 — drop validated entries whose `last_activity_ms` is
+    // older than `now_ms - stale_threshold_ms`. Catches links whose
+    // peers wandered off without sending LINKCLOSE; without this,
+    // _entries grows unboundedly in long-running deployments.
+    // Returns count removed.
+    size_t evict_stale(uint64_t now_ms, uint64_t stale_threshold_ms);
 
     size_t size()  const { return _entries.size(); }
     bool   empty() const { return _entries.empty(); }

@@ -1319,6 +1319,55 @@ void test_link_data_initiator_to_responder() {
     TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
 }
 
+// §6.7.2 — validated link with no traffic for the staleness window
+// gets evicted by tick(). Catches links whose peers wandered off
+// without sending LINKCLOSE.
+void test_link_table_evicts_stale_validated_links() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+    Bytes lrproof = synth_lrproof(s.link_id, Bytes(32), alice_identity());
+    t.inbound(&out_iface, lrproof, /*now_ms=*/3000);
+    TEST_ASSERT_TRUE(t.link_table().get(s.link_id)->validated);
+
+    // tick() just inside the window — entry stays.
+    t.tick(3000 + Transport::LINK_STALE_THRESHOLD_MS - 1);
+    TEST_ASSERT_NOT_NULL(t.link_table().get(s.link_id));
+
+    // tick() just past the window — evicted.
+    t.tick(3000 + Transport::LINK_STALE_THRESHOLD_MS + 1);
+    TEST_ASSERT_NULL(t.link_table().get(s.link_id));
+}
+
+// §6.7.2 — Link DATA traffic resets last_activity, so an active
+// link is NOT aged out even past the original threshold.
+void test_link_table_traffic_resets_staleness_clock() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+    Bytes lrproof = synth_lrproof(s.link_id, Bytes(32), alice_identity());
+    t.inbound(&out_iface, lrproof, /*now_ms=*/3000);
+
+    // Some traffic 5 minutes in.
+    Bytes link_data = synth_link_data(s.link_id, Bytes::from_hex("aa"));
+    t.inbound(&in_iface, link_data, 3000 + 5ULL * 60ULL * 1000ULL);
+
+    // tick() at 12 minutes from establishment — would have evicted if
+    // staleness counted from establishment, but the data refreshed
+    // last_activity to 5min, so the 10-min window resets and we're
+    // only 7 min past the last activity. Entry stays.
+    t.tick(3000 + 12ULL * 60ULL * 1000ULL);
+    TEST_ASSERT_NOT_NULL(t.link_table().get(s.link_id));
+
+    // tick() at 16 minutes — now 11 min past the last activity. Evicted.
+    t.tick(3000 + 16ULL * 60ULL * 1000ULL);
+    TEST_ASSERT_NULL(t.link_table().get(s.link_id));
+}
+
 // §6.7.3 — LINKCLOSE arrives on a validated link: forward
 // bidirectionally per §12.5.2, then drop the link_table entry.
 void test_link_close_forwards_and_clears_link_table() {
@@ -1804,6 +1853,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_link_data_initiator_to_responder);
     RUN_TEST(test_link_data_responder_to_initiator);
     RUN_TEST(test_link_close_forwards_and_clears_link_table);
+    RUN_TEST(test_link_table_evicts_stale_validated_links);
+    RUN_TEST(test_link_table_traffic_resets_staleness_clock);
     RUN_TEST(test_link_data_before_validation_is_dropped);
     RUN_TEST(test_link_data_unknown_link);
     RUN_TEST(test_path_request_branch_1_local_destination);
