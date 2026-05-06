@@ -68,6 +68,21 @@ public:
     // transport_id isn't 16 bytes.
     Packet originator_to_header_2(const Bytes& transport_id) const;
 
+    // §12.2.1 — relay forward of an already-HEADER_2 packet, replacing
+    // the transport_id with the next-hop transport_id from the path
+    // table. Flags / hops / dest_hash / context / body are preserved
+    // (caller has already incremented hops on inbound). Throws if
+    // `*this` isn't HEADER_2 or transport_id isn't 16 bytes.
+    Packet replace_transport_id(const Bytes& new_transport_id) const;
+
+    // §12.2.2 — relay forward of a HEADER_2 packet as HEADER_1
+    // BROADCAST. Used when remaining_hops to destination is 1: the
+    // next hop IS the destination, so transport_id is stripped.
+    // Flag-byte transformation: bits 7-6 → HEADER_1, bit 4 → BROADCAST,
+    // bit 5 cleared, bits 3-0 preserved. Throws if `*this` isn't
+    // HEADER_2.
+    Packet strip_transport_id_to_header_1() const;
+
     // §2.1 flag accessors.
     HeaderType      header_type()      const { return static_cast<HeaderType>     ((_flags >> 6) & 0x03); }
     bool            context_flag()     const { return ((_flags >> 5) & 0x01) != 0; }

@@ -91,16 +91,20 @@ public:
     // Stat counters for tests / monitoring. None of these are wire
     // semantics — purely diagnostic.
     struct Stats {
-        uint64_t inbound_packets       = 0;
-        uint64_t parse_failures        = 0;
-        uint64_t dedup_drops           = 0;
-        uint64_t self_announce_drops   = 0;
-        uint64_t announce_validated    = 0;
-        uint64_t announce_rejected     = 0;
-        uint64_t collisions_rejected   = 0;
-        uint64_t announces_delivered   = 0;
-        uint64_t announces_queued      = 0;  // AnnounceTable insertions
-        uint64_t announces_rebroadcast = 0;  // tick()-driven emissions
+        uint64_t inbound_packets        = 0;
+        uint64_t parse_failures         = 0;
+        uint64_t dedup_drops            = 0;
+        uint64_t self_announce_drops    = 0;
+        uint64_t announce_validated     = 0;
+        uint64_t announce_rejected      = 0;
+        uint64_t collisions_rejected    = 0;
+        uint64_t announces_delivered    = 0;
+        uint64_t announces_queued       = 0;  // AnnounceTable insertions
+        uint64_t announces_rebroadcast  = 0;  // tick()-driven emissions
+        uint64_t data_inbound           = 0;  // DATA packets entering forward dispatch
+        uint64_t data_forwarded_header_2 = 0; // §12.2.1 emits
+        uint64_t data_forwarded_header_1 = 0; // §12.2.2 emits
+        uint64_t data_local_arrived     = 0;  // §12.2.3 local hand-off (deferred)
     };
     const Stats& stats() const { return _stats; }
 
@@ -117,6 +121,13 @@ private:
 
     void handle_announce(Interface* received_on, const Packet& packet,
                          uint64_t now_ms);
+
+    // §12.2 — relay DATA forwarding. Branches on `path.hops`:
+    //   > 1  → §12.2.1 forward HEADER_2 with new transport_id
+    //   == 1 → §12.2.2 strip transport_id, broadcast HEADER_1
+    //   == 0 → §12.2.3 local destination (deferred)
+    void handle_data_forward(Interface* received_on, const Packet& packet,
+                             uint64_t now_ms);
 
     // §4.5 step 6.1 — record a freshly-validated announce's pubkey,
     // and update the path entry (timestamp / hops / next_hop /

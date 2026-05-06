@@ -77,6 +77,28 @@ Identity bob_identity() {
     return Identity::from_private_bytes(Bytes::from_hex(BOB_PRIV_HEX));
 }
 
+// flags: HEADER_2 (0x40) | TRANSPORT (0x10) | SINGLE (00) | DATA (00) = 0x50
+constexpr uint8_t DATA_HEADER_2_FLAGS = 0x50;
+
+Bytes synth_data_packet(const Bytes& transport_id, const Bytes& dest_hash,
+                        const Bytes& body, uint8_t hops = 0) {
+    return Packet::pack_header_2(DATA_HEADER_2_FLAGS, hops,
+                                 transport_id, dest_hash,
+                                 Packet::CONTEXT_NONE, body);
+}
+
+// Convert the alice_no_ratchet announce wire to HEADER_2 form with a
+// caller-supplied transport_id. Used to seed path entries with hops > 1
+// for §12.2.1 tests. Sets the wire's hops byte to `hops` before
+// returning so the caller controls what value Transport sees.
+Bytes alice_announce_header_2(const Bytes& transport_id, uint8_t hops) {
+    Packet h1 = Packet::from_wire_bytes(Bytes::from_hex(ALICE_NO_RATCHET_WIRE));
+    Packet h2 = h1.originator_to_header_2(transport_id);
+    Bytes wire = h2.wire_bytes();
+    wire[1] = hops;
+    return wire;
+}
+
 } // namespace
 
 void test_inbound_validates_and_caches_announce() {
@@ -97,11 +119,15 @@ void test_inbound_validates_and_caches_announce() {
     TEST_ASSERT_EQUAL_STRING(ALICE_PUB_KEY, pub->to_hex().c_str());
 
     // Path entry should exist with our stub as the receiving interface
-    // and the announce wire cached.
+    // and the announce wire cached. The wire has had its hops byte
+    // bumped to 1 by §2.4 inbound increment.
     const auto* path = t.path_table().get(alice_dest);
     TEST_ASSERT_NOT_NULL(path);
     TEST_ASSERT_EQUAL_PTR(&iface, path->receiving_interface);
-    TEST_ASSERT_EQUAL_STRING(ALICE_NO_RATCHET_WIRE,
+    TEST_ASSERT_EQUAL_UINT8(1, path->hops);
+    Bytes expected_cached_wire = wire;
+    expected_cached_wire[1] = 0x01;
+    TEST_ASSERT_EQUAL_STRING(expected_cached_wire.to_hex().c_str(),
                              path->announce_wire.to_hex().c_str());
     TEST_ASSERT_EQUAL_UINT(1, path->random_blobs.size());
 }
@@ -318,6 +344,173 @@ void test_relay_does_not_rebroadcast_random_blob_replay() {
     TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_queued);  // unchanged
 }
 
+// §12.2.2 — relay receives DATA addressed to a destination 1 hop
+// away. Strips transport_id, broadcasts as HEADER_1 on the path's
+// receiving_interface.
+void test_data_forward_last_hop_strips_transport_id() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // Alice's announce arrives on out_iface (HEADER_1, hops=0). After
+    // the §2.4 inbound bump, path[alice].hops = 1.
+    Bytes announce_wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    t.inbound(&out_iface, announce_wire, 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    TEST_ASSERT_EQUAL_UINT8(1, t.path_table().get(alice_dest)->hops);
+
+    // Synthesize DATA packet for alice, transport_id = us.
+    Bytes body = Bytes::from_hex("11223344aabbccdd");
+    Bytes data_wire = synth_data_packet(t.local_identity().identity_hash(),
+                                        alice_dest, body, /*hops=*/0);
+
+    // Clear emitted from the announce-rebroadcast queueing — but
+    // those don't touch emitted yet (no tick called).
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    t.inbound(&in_iface, data_wire, 1500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_inbound);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_forwarded_header_1);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_2);
+
+    // Forward went out on out_iface (path.receiving_interface).
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+
+    // Parse the emitted wire — must be HEADER_1, no transport_id,
+    // dest_hash and body unchanged, hops bumped to 1.
+    Packet emitted = Packet::from_wire_bytes(out_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_1);
+    TEST_ASSERT_TRUE(emitted.transport_type() == Packet::TransportType::BROADCAST);
+    TEST_ASSERT_EQUAL_UINT8(1, emitted.hops());
+    TEST_ASSERT_EQUAL_UINT(0, emitted.transport_id().size());
+    TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH,
+                             emitted.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(body.to_hex().c_str(),
+                             emitted.data().to_hex().c_str());
+}
+
+// §12.2.1 — relay receives DATA addressed to a destination >1 hop
+// away. Replaces transport_id with path.next_hop, keeps HEADER_2.
+void test_data_forward_multi_hop_replaces_transport_id() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // Seed path[alice] with hops > 1 by feeding a HEADER_2 announce
+    // whose transport_id is some upstream relay (R_id). Wire arrives
+    // on in_iface with hops=2; inbound bump puts it at 3.
+    Bytes upstream_id = Bytes::from_hex("aabbccddeeff00112233445566778899");
+    Bytes announce_wire = alice_announce_header_2(upstream_id, /*hops=*/2);
+    t.inbound(&in_iface, announce_wire, 1000);
+
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    const auto* path = t.path_table().get(alice_dest);
+    TEST_ASSERT_NOT_NULL(path);
+    TEST_ASSERT_EQUAL_UINT8(3, path->hops);
+    TEST_ASSERT_EQUAL_STRING(upstream_id.to_hex().c_str(),
+                             path->next_hop.to_hex().c_str());
+
+    // DATA for alice with our identity as transport_id, on out_iface.
+    Bytes body = Bytes::from_hex("cafef00d");
+    Bytes data_wire = synth_data_packet(t.local_identity().identity_hash(),
+                                        alice_dest, body);
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    t.inbound(&out_iface, data_wire, 1500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_inbound);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_forwarded_header_2);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_1);
+
+    // Forward went out on in_iface (path.receiving_interface — the
+    // direction we learned alice from).
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+
+    Packet emitted = Packet::from_wire_bytes(in_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_UINT8(1, emitted.hops());  // bumped from 0 on inbound
+    TEST_ASSERT_EQUAL_STRING(upstream_id.to_hex().c_str(),
+                             emitted.transport_id().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH,
+                             emitted.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(body.to_hex().c_str(),
+                             emitted.data().to_hex().c_str());
+}
+
+// DATA with transport_id pointing to someone else — not for us, drop.
+void test_data_not_for_us_is_ignored() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    // Seed a path entry so the lookup wouldn't fail for the wrong reason.
+    Bytes announce_wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    t.inbound(&iface, announce_wire, 1000);
+
+    Bytes someone_else_id =
+        Bytes::from_hex("ffffffffffffffffffffffffffffffff");
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes data_wire = synth_data_packet(someone_else_id, alice_dest,
+                                        Bytes::from_hex("aa"));
+    iface.emitted.clear();
+    t.inbound(&iface, data_wire, 1500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_inbound);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_1);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_2);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// DATA for an unknown destination — no path entry, drop.
+void test_data_for_unknown_dest_is_ignored() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes unknown_dest =
+        Bytes::from_hex("99999999999999999999999999999999");
+    Bytes data_wire = synth_data_packet(t.local_identity().identity_hash(),
+                                        unknown_dest, Bytes::from_hex("bb"));
+    t.inbound(&iface, data_wire, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_inbound);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_1);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_2);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// HEADER_1 broadcast DATA — not addressed via transport, doesn't
+// enter §12.2's forward dispatch.
+void test_data_header_1_does_not_forward() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    // Seed path so unknown-dest isn't the reason for the no-op.
+    t.inbound(&iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+
+    // HEADER_1 DATA: flags = SINGLE | DATA = 0x00.
+    Bytes data_wire = Packet::pack_header_1(
+        /*flags=*/0x00, /*hops=*/0, alice_dest,
+        Packet::CONTEXT_NONE, Bytes::from_hex("dd"));
+    iface.emitted.clear();
+    t.inbound(&iface, data_wire, 1500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().data_inbound);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_1);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().data_forwarded_header_2);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -347,6 +540,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_relay_rebroadcasts_on_other_interfaces);
     RUN_TEST(test_path_response_announce_does_not_rebroadcast);
     RUN_TEST(test_relay_does_not_rebroadcast_random_blob_replay);
+    RUN_TEST(test_data_forward_last_hop_strips_transport_id);
+    RUN_TEST(test_data_forward_multi_hop_replaces_transport_id);
+    RUN_TEST(test_data_not_for_us_is_ignored);
+    RUN_TEST(test_data_for_unknown_dest_is_ignored);
+    RUN_TEST(test_data_header_1_does_not_forward);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

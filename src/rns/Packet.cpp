@@ -92,6 +92,33 @@ Packet Packet::originator_to_header_2(const Bytes& transport_id) const {
     return from_wire_bytes(new_raw);
 }
 
+Packet Packet::replace_transport_id(const Bytes& new_transport_id) const {
+    if (header_type() != HeaderType::HEADER_2) {
+        throw std::invalid_argument("replace_transport_id: source must be HEADER_2");
+    }
+    if (new_transport_id.size() != TRANSPORT_ID_LEN) {
+        throw std::invalid_argument("replace_transport_id: transport_id must be 16 bytes");
+    }
+    Bytes new_raw = pack_header_2(_flags, _hops, new_transport_id,
+                                  _dest_hash, _context, _data);
+    return from_wire_bytes(new_raw);
+}
+
+Packet Packet::strip_transport_id_to_header_1() const {
+    if (header_type() != HeaderType::HEADER_2) {
+        throw std::invalid_argument("strip_transport_id_to_header_1: source must be HEADER_2");
+    }
+    // §12.2.2 transformation:
+    //   bits 7-6 → HEADER_1 (00)
+    //   bit 4    → BROADCAST (0)
+    //   bit 5    → cleared
+    //   bits 3-0 → preserved
+    constexpr uint8_t LOW_NIBBLE_MASK = 0x0F;
+    const uint8_t new_flags = _flags & LOW_NIBBLE_MASK;
+    Bytes new_raw = pack_header_1(new_flags, _hops, _dest_hash, _context, _data);
+    return from_wire_bytes(new_raw);
+}
+
 AnnounceBody parse_announce_body(const Bytes& body, bool context_flag) {
     // §4.5 step 1 — slice offsets keyed by context_flag.
     constexpr size_t PUB_LEN     = 64;

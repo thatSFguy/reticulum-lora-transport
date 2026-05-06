@@ -301,6 +301,81 @@ void test_originator_to_header_2_rejects_already_header_2() {
     }
 }
 
+// §12.2.1 — replace_transport_id keeps the HEADER_2 form, swaps the
+// transport_id bytes, leaves everything else byte-identical.
+void test_replace_transport_id() {
+    Bytes orig_tid = Bytes::from_hex("11111111111111111111111111111111");
+    Bytes new_tid  = Bytes::from_hex("22222222222222222222222222222222");
+    Bytes dh       = Bytes::from_hex("aabbccddeeff00112233445566778899");
+    Bytes body     = Bytes::from_hex("deadbeefcafef00d");
+    Bytes packed   = Packet::pack_header_2(0x50, /*hops=*/3, orig_tid, dh,
+                                           Packet::CONTEXT_NONE, body);
+    Packet p = Packet::from_wire_bytes(packed);
+
+    Packet p2 = p.replace_transport_id(new_tid);
+    TEST_ASSERT_TRUE(p2.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_UINT8(p.flags(),  p2.flags());
+    TEST_ASSERT_EQUAL_UINT8(p.hops(),   p2.hops());
+    TEST_ASSERT_EQUAL_UINT8(p.context(), p2.context());
+    TEST_ASSERT_EQUAL_STRING(new_tid.to_hex().c_str(),
+                             p2.transport_id().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(p.destination_hash().to_hex().c_str(),
+                             p2.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(p.data().to_hex().c_str(),
+                             p2.data().to_hex().c_str());
+}
+
+void test_replace_transport_id_rejects_header_1() {
+    Bytes raw = Bytes::from_hex(ALICE_NO_RATCHET.wire_bytes_hex);
+    Packet p  = Packet::from_wire_bytes(raw);
+    try {
+        (void)p.replace_transport_id(
+            Bytes::from_hex("00000000000000000000000000000000"));
+        TEST_FAIL_MESSAGE("expected throw — source is HEADER_1");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+}
+
+// §12.2.2 — strip_transport_id_to_header_1 converts HEADER_2 to
+// HEADER_1, drops transport_id, sets BROADCAST, clears bit 5,
+// preserves bits 3-0.
+void test_strip_transport_id_to_header_1() {
+    Bytes tid  = Bytes::from_hex("33333333333333333333333333333333");
+    Bytes dh   = Bytes::from_hex("44444444444444444444444444444444");
+    Bytes body = Bytes::from_hex("11223344");
+    // flags 0x73 = HEADER_2(01) | bit5 set | TRANSPORT(1) | bits3-0 = 0x03
+    Bytes packed = Packet::pack_header_2(0x73, /*hops=*/7, tid, dh,
+                                         Packet::CONTEXT_NONE, body);
+    Packet p = Packet::from_wire_bytes(packed);
+
+    Packet p2 = p.strip_transport_id_to_header_1();
+    // 0x73 & 0x0F = 0x03. Header-form bits (7-6) zero, bit 5 cleared,
+    // bit 4 (BROADCAST=0), low nibble preserved.
+    TEST_ASSERT_EQUAL_UINT8(0x03, p2.flags());
+    TEST_ASSERT_TRUE(p2.header_type() == Packet::HeaderType::HEADER_1);
+    TEST_ASSERT_TRUE(p2.transport_type() == Packet::TransportType::BROADCAST);
+    TEST_ASSERT_FALSE(p2.context_flag());
+    TEST_ASSERT_EQUAL_UINT8(p.hops(),   p2.hops());
+    TEST_ASSERT_EQUAL_UINT8(p.context(), p2.context());
+    TEST_ASSERT_EQUAL_UINT(0, p2.transport_id().size());
+    TEST_ASSERT_EQUAL_STRING(p.destination_hash().to_hex().c_str(),
+                             p2.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(p.data().to_hex().c_str(),
+                             p2.data().to_hex().c_str());
+}
+
+void test_strip_transport_id_rejects_header_1() {
+    Bytes raw = Bytes::from_hex(ALICE_NO_RATCHET.wire_bytes_hex);
+    Packet p  = Packet::from_wire_bytes(raw);
+    try {
+        (void)p.strip_transport_id_to_header_1();
+        TEST_FAIL_MESSAGE("expected throw — source is HEADER_1");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+}
+
 void test_pack_rejects_wrong_size_inputs() {
     Bytes good_dh  = Bytes::from_hex("11111111111111111111111111111111");
     Bytes good_tid = Bytes::from_hex("22222222222222222222222222222222");
@@ -337,6 +412,10 @@ int main(int argc, char** argv) {
     RUN_TEST(test_originator_to_header_2);
     RUN_TEST(test_originator_to_header_2_clears_context_flag);
     RUN_TEST(test_originator_to_header_2_rejects_already_header_2);
+    RUN_TEST(test_replace_transport_id);
+    RUN_TEST(test_replace_transport_id_rejects_header_1);
+    RUN_TEST(test_strip_transport_id_to_header_1);
+    RUN_TEST(test_strip_transport_id_rejects_header_1);
     RUN_TEST(test_pack_rejects_wrong_size_inputs);
     return UNITY_END();
 }

@@ -54,21 +54,12 @@ void Transport::tick(uint64_t now_ms) {
 void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
     auto due = _announce_table.pop_due(now_ms);
     for (auto& entry : due) {
-        // §2.4 — relay increments the hops byte. Clone the cached wire
-        // bytes (we may emit on multiple interfaces — each gets its
-        // own buffer because Interface::queue_announce takes by value).
-        Bytes wire = entry.announce_wire;
-        if (wire.size() >= 2) {
-            // Saturate at 255 rather than wrapping. Real meshes never
-            // come anywhere near this, but UB on overflow is its own
-            // problem.
-            if (wire[1] < 255) wire[1] = wire[1] + 1;
-        }
-        const uint8_t fwd_hops = (entry.announce_hops < 255)
-                               ? entry.announce_hops + 1 : 255;
+        // hops byte was already incremented at inbound() entry per
+        // §2.4; the cached announce_wire reflects the post-bump
+        // value, so we re-emit it as-is.
         for (Interface* iface : _interfaces) {
             if (iface == entry.received_from) continue;  // don't echo back
-            iface->queue_announce(wire, fwd_hops);
+            iface->queue_announce(entry.announce_wire, entry.announce_hops);
         }
         _stats.announces_rebroadcast++;
     }
@@ -77,9 +68,17 @@ void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
 void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_ms) {
     _stats.inbound_packets++;
 
+    // §2.4 — increment hops to count the hop just taken (matches
+    // upstream Transport.inbound:1395). Mutate a copy of the wire so
+    // every downstream consumer sees the post-bump value (path_table
+    // hops, cached announce_wire, dedup hash, rebroadcast emit).
+    // Saturate at 255 — overflow doesn't happen in real meshes.
+    Bytes bumped = wire;
+    if (bumped.size() >= 2 && bumped[1] < 255) bumped[1] = bumped[1] + 1;
+
     std::optional<Packet> parsed;
     try {
-        parsed = Packet::from_wire_bytes(wire);
+        parsed = Packet::from_wire_bytes(bumped);
     } catch (const std::invalid_argument&) {
         _stats.parse_failures++;
         return;
@@ -87,17 +86,22 @@ void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_
     const Packet& packet = *parsed;
 
     // §13.4 — drop on dedup hit. insert() returns false if the hash
-    // was already present.
+    // was already present. Computed AFTER the hops bump but the bump
+    // doesn't enter the dedup material (hops is excluded), so two
+    // copies via different paths still dedup.
     if (!_hashlist.insert(dedup_hash(packet))) {
         _stats.dedup_drops++;
         return;
     }
 
-    // Dispatch by packet_type. DATA / LINKREQUEST / PROOF land in
-    // later PRs; for now they're silently dropped (caller has done
-    // its job by handing them to us).
+    // Dispatch by packet_type. LINKREQUEST / PROOF land in later PRs;
+    // for now they're silently dropped (caller has done its job by
+    // handing them to us).
     if (packet.packet_type() == Packet::PacketType::ANNOUNCE) {
         handle_announce(received_on, packet, now_ms);
+    } else if (packet.packet_type() == Packet::PacketType::DATA &&
+               packet.destination_type() != Packet::DestinationType::LINK) {
+        handle_data_forward(received_on, packet, now_ms);
     }
 }
 
@@ -163,6 +167,49 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
     }
 }
 
+void Transport::handle_data_forward(Interface* received_on, const Packet& packet,
+                                    uint64_t now_ms) {
+    (void)received_on;
+    (void)now_ms;
+
+    _stats.data_inbound++;
+
+    // §12.2 entry: HEADER_2 packet whose transport_id is us, AND we
+    // have a path entry for the destination.
+    if (packet.header_type() != Packet::HeaderType::HEADER_2) return;
+    if (packet.transport_id() != _local.identity_hash())     return;
+
+    const PathEntry* path = _paths.get(packet.destination_hash());
+    if (!path)                          return;
+    if (!path->receiving_interface)     return;
+
+    const uint8_t remaining = path->hops;
+
+    if (remaining > 1) {
+        // §12.2.1 — replace transport_id with path.next_hop, keep
+        // HEADER_2. Skip if we don't actually have a next_hop cached
+        // (the path entry came from a HEADER_1 announce and the
+        // origin is supposed to be 1 hop away, but the path's hops
+        // field disagrees — defensively drop).
+        if (path->next_hop.size() != Packet::TRANSPORT_ID_LEN) return;
+        Packet forwarded = packet.replace_transport_id(path->next_hop);
+        path->receiving_interface->transmit_now(forwarded.wire_bytes());
+        _stats.data_forwarded_header_2++;
+    } else if (remaining == 1) {
+        // §12.2.2 — strip transport_id, broadcast as HEADER_1. Last
+        // hop: dest is on the same interface and will hear the
+        // broadcast directly.
+        Packet forwarded = packet.strip_transport_id_to_header_1();
+        path->receiving_interface->transmit_now(forwarded.wire_bytes());
+        _stats.data_forwarded_header_1++;
+    } else {
+        // §12.2.3 — local destination. Hand-off to local Destination
+        // dispatch lands when local destinations are registered on
+        // Transport. For now we just count it.
+        _stats.data_local_arrived++;
+    }
+}
+
 bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
                                          Interface* received_on,
                                          const Packet& packet,
@@ -183,7 +230,14 @@ bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
     e.timestamp_ms        = now_ms;
     e.hops                = packet.hops();
     e.expires_ms          = now_ms + 60ULL * 60ULL * 1000ULL;  // §12.4.1 AP_PATH_TIME default
-    e.next_hop            = Bytes(16);  // unknown until DATA forwarding learns it
+    // For HEADER_2 announces the wire's transport_id is the relay
+    // that forwarded the announce to us — that's our next hop on
+    // the way back to the destination. For HEADER_1 announces the
+    // dest is 1 hop away on `received_on`; no transport_id is
+    // needed for forwarding (we'd strip it via §12.2.2 anyway).
+    e.next_hop            = (packet.header_type() == Packet::HeaderType::HEADER_2)
+                          ? packet.transport_id()
+                          : Bytes();
     e.receiving_interface = received_on;
     e.announce_wire       = packet.wire_bytes();
     if (const PathEntry* existing = _paths.get(va.destination_hash)) {
