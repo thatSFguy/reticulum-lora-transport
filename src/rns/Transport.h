@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "rns/Bytes.h"
+#include "rns/Destination.h"
 #include "rns/Identity.h"
 #include "rns/tables/AnnounceTable.h"
 #include "rns/tables/LinkTable.h"
@@ -42,6 +43,15 @@ class Packet;
 // filtering by the application).
 using AnnounceHandler =
     std::function<void(const ValidatedAnnounce& va, Interface* received_on)>;
+
+// Caller-supplied source of (random_prefix, unix_seconds) used to
+// build outbound announces. random_prefix MUST be 5 bytes from a
+// real entropy source (§4.1). Set once by firmware glue at startup.
+// If unset, paths that need to build a fresh announce (currently
+// §7.2 branch 1 path-response, telemetry beacon when it lands) drop
+// with a stat counter rather than crashing.
+struct AnnounceSeed { Bytes random_prefix; uint64_t unix_seconds; };
+using AnnounceSeedFn = std::function<AnnounceSeed()>;
 
 class Transport {
 public:
@@ -89,6 +99,22 @@ public:
     // are supported; all fire on each validated announce in
     // registration order.
     void register_announce_handler(AnnounceHandler cb);
+
+    // Register a Destination that lives on this node. Inbound packets
+    // (path requests targeting it, future DATA addressed to it) get
+    // local-dispatch instead of forwarding. The Destination is moved
+    // into Transport's storage; the Identity inside MUST own a
+    // private key (so we can sign announces / decrypt for it).
+    void register_local_destination(Destination dest);
+
+    // Test/inspection.
+    bool is_local_destination(const Bytes& dest_hash) const;
+    size_t local_destination_count() const { return _local_destinations.size(); }
+
+    // Set the (random_prefix, unix_seconds) source used to build
+    // outbound announces. Without this, branch 1 of §7.2 silently
+    // drops requests for our own destinations.
+    void set_announce_seed_fn(AnnounceSeedFn fn);
 
     // Introspection — used by tests and status pages.
     const Identity&       local_identity()     const { return _local; }
@@ -139,6 +165,8 @@ public:
         uint64_t link_data_forwarded      = 0;  // §12.5.2 emits
         uint64_t link_data_unknown_link   = 0;  // dest_hash not in link_table
         uint64_t link_data_unvalidated    = 0;  // link not yet established
+        uint64_t path_requests_local_answered = 0; // §7.2 branch 1 — local dest match
+        uint64_t path_requests_local_no_seed  = 0; // §7.2 branch 1 dropped (no seed fn)
     };
     const Stats& stats() const { return _stats; }
 
@@ -156,9 +184,11 @@ private:
     ReverseTable    _reverse_table;
     LinkTable       _link_table;
     PacketHashList  _pr_tags{MAX_PR_TAGS};
-    std::unordered_map<std::string, Bytes> _known_destinations;  // dest_hash → 64B pub
+    std::unordered_map<std::string, Bytes>      _known_destinations;  // dest_hash → 64B pub
+    std::unordered_map<std::string, Destination> _local_destinations;  // dest_hash hex → Destination
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
+    AnnounceSeedFn _announce_seed_fn;
     Stats _stats;
 
     void handle_announce(Interface* received_on, const Packet& packet,

@@ -21,6 +21,7 @@
 
 #include "rns/Bytes.h"
 #include "rns/Crypto.h"
+#include "rns/Destination.h"
 #include "rns/Identity.h"
 #include "rns/Interface.h"
 #include "rns/Packet.h"
@@ -1235,6 +1236,91 @@ void test_link_data_unknown_link() {
     TEST_ASSERT_EQUAL_UINT(0, t.stats().link_data_forwarded);
 }
 
+// §7.2.3 branch 1 — register a local Destination, send a path-request
+// for it, expect a path-response announce on the requesting interface.
+void test_path_request_branch_1_local_destination() {
+    Transport t(bob_identity(), /*transport_enabled=*/false);  // even leaves answer for local
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    rns::Destination local(bob_identity(), "test.local.dest");
+    Bytes local_hash = local.destination_hash();
+    t.register_local_destination(local);
+
+    t.set_announce_seed_fn([]() {
+        return rns::AnnounceSeed{
+            Bytes::from_hex("0102030405"), /*unix_seconds=*/2'000'000'000ULL };
+    });
+
+    Bytes tag = Bytes::from_hex("66666666666666666666666666666666");
+    Bytes pr  = synth_path_request(local_hash, tag);
+
+    iface.emitted.clear();
+    t.inbound(&iface, pr, /*now_ms=*/1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_local_answered);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_answered);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_local_no_seed);
+    TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());
+
+    // Parse the emitted wire — it should be a valid PATH_RESPONSE
+    // announce for `local_hash`.
+    Packet emitted = Packet::from_wire_bytes(iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.packet_type() == Packet::PacketType::ANNOUNCE);
+    TEST_ASSERT_EQUAL_UINT8(Packet::CONTEXT_PATH_RESPONSE, emitted.context());
+    TEST_ASSERT_EQUAL_STRING(local_hash.to_hex().c_str(),
+                             emitted.destination_hash().to_hex().c_str());
+
+    // Signature is valid — route the emitted packet through
+    // Identity::validate_announce. is_path_response should also flip.
+    auto va = Identity::validate_announce(emitted);
+    TEST_ASSERT_TRUE_MESSAGE(va.has_value(),
+        "emitted path-response must satisfy §4.5 cryptographic validation");
+    TEST_ASSERT_TRUE(va->is_path_response);
+}
+
+// Without an announce_seed_fn, branch 1 drops with a stat counter
+// instead of crashing.
+void test_path_request_local_no_seed_drops() {
+    Transport t(bob_identity(), /*transport_enabled=*/false);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    rns::Destination local(bob_identity(), "test.no.seed");
+    t.register_local_destination(local);
+    // Intentionally NO set_announce_seed_fn.
+
+    Bytes pr = synth_path_request(
+        local.destination_hash(),
+        Bytes::from_hex("88888888888888888888888888888888"));
+
+    iface.emitted.clear();
+    t.inbound(&iface, pr, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_local_no_seed);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_local_answered);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// is_local_destination accessor / registration sanity.
+void test_local_destination_registry() {
+    Transport t(bob_identity(), false);
+    rns::Destination d1(bob_identity(), "first");
+    rns::Destination d2(bob_identity(), "second");
+    Bytes h1 = d1.destination_hash();
+    Bytes h2 = d2.destination_hash();
+    TEST_ASSERT_FALSE(t.is_local_destination(h1));
+
+    t.register_local_destination(d1);
+    TEST_ASSERT_TRUE(t.is_local_destination(h1));
+    TEST_ASSERT_FALSE(t.is_local_destination(h2));
+    TEST_ASSERT_EQUAL_UINT(1, t.local_destination_count());
+
+    t.register_local_destination(d2);
+    TEST_ASSERT_EQUAL_UINT(2, t.local_destination_count());
+    TEST_ASSERT_TRUE(t.is_local_destination(h2));
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -1291,6 +1377,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_link_data_responder_to_initiator);
     RUN_TEST(test_link_data_before_validation_is_dropped);
     RUN_TEST(test_link_data_unknown_link);
+    RUN_TEST(test_path_request_branch_1_local_destination);
+    RUN_TEST(test_path_request_local_no_seed_drops);
+    RUN_TEST(test_local_destination_registry);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

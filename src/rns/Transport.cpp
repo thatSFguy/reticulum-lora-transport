@@ -34,6 +34,19 @@ void Transport::register_announce_handler(AnnounceHandler cb) {
     _announce_handlers.push_back(std::move(cb));
 }
 
+void Transport::register_local_destination(Destination dest) {
+    auto k = key_of(dest.destination_hash());
+    _local_destinations.emplace(std::move(k), std::move(dest));
+}
+
+bool Transport::is_local_destination(const Bytes& dest_hash) const {
+    return _local_destinations.find(key_of(dest_hash)) != _local_destinations.end();
+}
+
+void Transport::set_announce_seed_fn(AnnounceSeedFn fn) {
+    _announce_seed_fn = std::move(fn);
+}
+
 const Bytes* Transport::public_key_for(const Bytes& dest_hash) const {
     auto it = _known_destinations.find(key_of(dest_hash));
     return (it == _known_destinations.end()) ? nullptr : &it->second;
@@ -315,10 +328,32 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
         return;
     }
 
-    // §7.2.3 dispatch. We implement only branches 2 and 5 in this
-    // first slice. Branch 1 (local destinations) and branches 3/4
-    // (forward path-request to other interfaces with fresh tag) need
-    // a local-destinations registry and outbound packet construction.
+    // §7.2.3 branch 1 — target matches a local destination. Answer
+    // by building a fresh path-response announce. This MUST run
+    // before branch 2 because we're authoritative for our own
+    // destinations and shouldn't punt to a cached path entry.
+    auto local_it = _local_destinations.find(key_of(target));
+    if (local_it != _local_destinations.end()) {
+        if (!_announce_seed_fn) {
+            _stats.path_requests_local_no_seed++;
+            return;
+        }
+        const Destination& local = local_it->second;
+        AnnounceSeed seed = _announce_seed_fn();
+        Bytes wire = local.build_announce(seed.random_prefix,
+                                          seed.unix_seconds,
+                                          /*app_data=*/{},
+                                          /*ratchet_pub=*/{},
+                                          /*path_response=*/true);
+        if (received_on) received_on->transmit_now(wire);
+        _stats.path_requests_local_answered++;
+        _stats.path_requests_answered++;
+        return;
+    }
+
+    // §7.2.3 branch 2 — known path AND we're transport-enabled.
+    // Branches 3/4 (forward path-request to other interfaces with a
+    // fresh tag) need outbound DATA construction and aren't here yet.
     const PathEntry* path = _paths.get(target);
     if (!path || !_transport_enabled) {
         _stats.path_requests_unanswered++;
