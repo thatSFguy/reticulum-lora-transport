@@ -214,6 +214,114 @@ void test_parse_announce_body_rejects_short() {
     }
 }
 
+// §2.2 — pack_header_1 is the inverse of from_wire_bytes for both
+// announce vectors. Round-trip the parsed fields and verify the
+// repacked wire bytes equal the originals.
+void test_pack_header_1_round_trip() {
+    for (const AnnounceVector* v : {&ALICE_NO_RATCHET, &ALICE_WITH_RATCHET}) {
+        Bytes raw = Bytes::from_hex(v->wire_bytes_hex);
+        Packet p  = Packet::from_wire_bytes(raw);
+        Bytes packed = Packet::pack_header_1(p.flags(), p.hops(),
+                                             p.destination_hash(),
+                                             p.context(), p.data());
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(
+            v->wire_bytes_hex, packed.to_hex().c_str(),
+            "pack_header_1 must reproduce parsed wire bytes");
+    }
+}
+
+// §2.2 — synthesize a HEADER_2 packet from scratch, parse it back,
+// and verify all fields round-trip cleanly.
+void test_pack_header_2_round_trip() {
+    Bytes tid  = Bytes::from_hex("00112233445566778899aabbccddeeff");
+    Bytes dh   = Bytes::from_hex("11111111222222223333333344444444");
+    Bytes body = Bytes::from_hex("deadbeefcafef00d");
+    // flags: HEADER_2 (bit 6) | TRANSPORT (bit 4) | DATA (00) = 0x50
+    Bytes packed = Packet::pack_header_2(0x50, 0x05, tid, dh,
+                                         Packet::CONTEXT_NONE, body);
+    Packet p = Packet::from_wire_bytes(packed);
+    TEST_ASSERT_TRUE(p.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_UINT8(0x05, p.hops());
+    TEST_ASSERT_EQUAL_STRING(tid.to_hex().c_str(), p.transport_id().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(dh.to_hex().c_str(),  p.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_UINT8(Packet::CONTEXT_NONE, p.context());
+    TEST_ASSERT_EQUAL_STRING(body.to_hex().c_str(), p.data().to_hex().c_str());
+}
+
+// §2.3 — originator HEADER_1→HEADER_2 conversion preserves the body
+// and dest_hash, inserts transport_id, sets HEADER_2 + TRANSPORT
+// bits, and preserves bits 3-0 (destination_type, packet_type).
+void test_originator_to_header_2() {
+    Bytes raw = Bytes::from_hex(ALICE_NO_RATCHET.wire_bytes_hex);
+    Packet p  = Packet::from_wire_bytes(raw);
+    Bytes tid = Bytes::from_hex("aabbccddeeff00112233445566778899");
+    Packet p2 = p.originator_to_header_2(tid);
+
+    // old flags 0x01 (HEADER_1, BROADCAST, SINGLE, ANNOUNCE) →
+    // new flags 0x40 | 0x10 | (0x01 & 0x0F) = 0x51
+    TEST_ASSERT_EQUAL_UINT8(0x51, p2.flags());
+    TEST_ASSERT_TRUE(p2.header_type()    == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_TRUE(p2.transport_type() == Packet::TransportType::TRANSPORT);
+    TEST_ASSERT_FALSE(p2.context_flag());
+    TEST_ASSERT_TRUE(p2.destination_type() == Packet::DestinationType::SINGLE);
+    TEST_ASSERT_TRUE(p2.packet_type()      == Packet::PacketType::ANNOUNCE);
+
+    TEST_ASSERT_EQUAL_UINT8(p.hops(), p2.hops());
+    TEST_ASSERT_EQUAL_STRING(tid.to_hex().c_str(), p2.transport_id().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(p.destination_hash().to_hex().c_str(),
+                             p2.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_UINT8(p.context(), p2.context());
+    TEST_ASSERT_EQUAL_STRING(p.data().to_hex().c_str(), p2.data().to_hex().c_str());
+}
+
+// §2.3 — context_flag (bit 5) is dropped during conversion. The
+// ratchet-bearing vector exercises this.
+void test_originator_to_header_2_clears_context_flag() {
+    Bytes raw = Bytes::from_hex(ALICE_WITH_RATCHET.wire_bytes_hex);
+    Packet p  = Packet::from_wire_bytes(raw);
+    TEST_ASSERT_TRUE(p.context_flag());  // 0x21 source flag
+    Packet p2 = p.originator_to_header_2(
+        Bytes::from_hex("aabbccddeeff00112233445566778899"));
+    // 0x21 & 0x0F = 0x01 → 0x40 | 0x10 | 0x01 = 0x51
+    TEST_ASSERT_EQUAL_UINT8(0x51, p2.flags());
+    TEST_ASSERT_FALSE(p2.context_flag());
+}
+
+void test_originator_to_header_2_rejects_already_header_2() {
+    Bytes tid = Bytes::from_hex("00112233445566778899aabbccddeeff");
+    Bytes dh  = Bytes::from_hex("22222222333333334444444455555555");
+    Bytes packed = Packet::pack_header_2(0x40, 0, tid, dh, 0, Bytes{});
+    Packet p = Packet::from_wire_bytes(packed);
+    try {
+        (void)p.originator_to_header_2(
+            Bytes::from_hex("ffffffffffffffffffffffffffffffff"));
+        TEST_FAIL_MESSAGE("expected throw — source already HEADER_2");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+}
+
+void test_pack_rejects_wrong_size_inputs() {
+    Bytes good_dh  = Bytes::from_hex("11111111111111111111111111111111");
+    Bytes good_tid = Bytes::from_hex("22222222222222222222222222222222");
+    Bytes short_hash(15);
+
+    try {
+        (void)Packet::pack_header_1(0x00, 0, short_hash, 0, Bytes{});
+        TEST_FAIL_MESSAGE("pack_header_1 must reject short dest_hash");
+    } catch (const std::invalid_argument&) {}
+
+    try {
+        (void)Packet::pack_header_2(0x40, 0, short_hash, good_dh, 0, Bytes{});
+        TEST_FAIL_MESSAGE("pack_header_2 must reject short transport_id");
+    } catch (const std::invalid_argument&) {}
+
+    try {
+        (void)Packet::pack_header_2(0x40, 0, good_tid, short_hash, 0, Bytes{});
+        TEST_FAIL_MESSAGE("pack_header_2 must reject short dest_hash");
+    } catch (const std::invalid_argument&) {}
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     UNITY_BEGIN();
@@ -224,5 +332,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_validate_rejects_non_announce_type);
     RUN_TEST(test_packet_wire_roundtrip);
     RUN_TEST(test_parse_announce_body_rejects_short);
+    RUN_TEST(test_pack_header_1_round_trip);
+    RUN_TEST(test_pack_header_2_round_trip);
+    RUN_TEST(test_originator_to_header_2);
+    RUN_TEST(test_originator_to_header_2_clears_context_flag);
+    RUN_TEST(test_originator_to_header_2_rejects_already_header_2);
+    RUN_TEST(test_pack_rejects_wrong_size_inputs);
     return UNITY_END();
 }

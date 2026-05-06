@@ -42,6 +42,32 @@ public:
     // the buffer is shorter than the header form indicated by `flags`.
     static Packet from_wire_bytes(const Bytes& raw);
 
+    // §2.2 — pack a HEADER_1 packet from its constituent fields. The
+    // header_type bits in `flags` must encode HEADER_1 (the caller
+    // sets all flag-byte sub-fields per §2.1); we don't override.
+    // Throws std::invalid_argument if dest_hash isn't 16 bytes.
+    static Bytes pack_header_1(uint8_t flags, uint8_t hops,
+                               const Bytes& dest_hash,
+                               uint8_t context,
+                               const Bytes& body);
+
+    // §2.2 — pack a HEADER_2 packet. transport_id and dest_hash both
+    // 16 bytes; throws std::invalid_argument otherwise.
+    static Bytes pack_header_2(uint8_t flags, uint8_t hops,
+                               const Bytes& transport_id,
+                               const Bytes& dest_hash,
+                               uint8_t context,
+                               const Bytes& body);
+
+    // §2.3 — originator HEADER_1 → HEADER_2 conversion. Used when an
+    // originator (not a relay) sends to a destination known to be
+    // more than 1 hop away. Sets bits 7-6 to HEADER_2, bit 4 to
+    // TRANSPORT, clears bit 5, preserves bits 3-0; inserts
+    // transport_id at offset 2; hops byte and body unchanged. Throws
+    // std::invalid_argument if `*this` is already HEADER_2 or
+    // transport_id isn't 16 bytes.
+    Packet originator_to_header_2(const Bytes& transport_id) const;
+
     // §2.1 flag accessors.
     HeaderType      header_type()      const { return static_cast<HeaderType>     ((_flags >> 6) & 0x03); }
     bool            context_flag()     const { return ((_flags >> 5) & 0x01) != 0; }

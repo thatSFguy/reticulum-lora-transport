@@ -35,6 +35,63 @@ Packet Packet::from_wire_bytes(const Bytes& raw) {
     return p;
 }
 
+Bytes Packet::pack_header_1(uint8_t flags, uint8_t hops,
+                            const Bytes& dest_hash, uint8_t context,
+                            const Bytes& body) {
+    if (dest_hash.size() != DEST_HASH_LEN) {
+        throw std::invalid_argument("Packet::pack_header_1: dest_hash must be 16 bytes");
+    }
+    Bytes out;
+    out.append(flags);
+    out.append(hops);
+    out.append(dest_hash);
+    out.append(context);
+    out.append(body);
+    return out;
+}
+
+Bytes Packet::pack_header_2(uint8_t flags, uint8_t hops,
+                            const Bytes& transport_id,
+                            const Bytes& dest_hash, uint8_t context,
+                            const Bytes& body) {
+    if (transport_id.size() != TRANSPORT_ID_LEN) {
+        throw std::invalid_argument("Packet::pack_header_2: transport_id must be 16 bytes");
+    }
+    if (dest_hash.size() != DEST_HASH_LEN) {
+        throw std::invalid_argument("Packet::pack_header_2: dest_hash must be 16 bytes");
+    }
+    Bytes out;
+    out.append(flags);
+    out.append(hops);
+    out.append(transport_id);
+    out.append(dest_hash);
+    out.append(context);
+    out.append(body);
+    return out;
+}
+
+Packet Packet::originator_to_header_2(const Bytes& transport_id) const {
+    if (header_type() != HeaderType::HEADER_1) {
+        throw std::invalid_argument("originator_to_header_2: source must be HEADER_1");
+    }
+    if (transport_id.size() != TRANSPORT_ID_LEN) {
+        throw std::invalid_argument("originator_to_header_2: transport_id must be 16 bytes");
+    }
+    // §2.3 transformation:
+    //   bits 7-6 → HEADER_2
+    //   bit 4    → TRANSPORT
+    //   bit 5    → cleared (context_flag dropped)
+    //   bits 3-0 → preserved (destination_type, packet_type)
+    constexpr uint8_t HEADER_2_BITS   = static_cast<uint8_t>(HeaderType::HEADER_2) << 6;
+    constexpr uint8_t TRANSPORT_BIT   = static_cast<uint8_t>(TransportType::TRANSPORT) << 4;
+    constexpr uint8_t LOW_NIBBLE_MASK = 0x0F;
+    const uint8_t new_flags = HEADER_2_BITS | TRANSPORT_BIT | (_flags & LOW_NIBBLE_MASK);
+
+    Bytes new_raw = pack_header_2(new_flags, _hops, transport_id,
+                                  _dest_hash, _context, _data);
+    return from_wire_bytes(new_raw);
+}
+
 AnnounceBody parse_announce_body(const Bytes& body, bool context_flag) {
     // §4.5 step 1 — slice offsets keyed by context_flag.
     constexpr size_t PUB_LEN     = 64;
