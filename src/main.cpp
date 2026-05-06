@@ -13,9 +13,11 @@
 
 #include "Battery.h"
 #include "Config.h"
+#include "ConfigProtocol.h"
 #include "ConfigStore.h"
 #include "Led.h"
 #include "Radio.h"
+#include "SerialConsole.h"
 #include "Storage.h"
 
 #include "rns/Bytes.h"
@@ -230,6 +232,15 @@ void loop() {
             g_transport->inbound(g_lora_iface, wire, now);
         }
     }
+
+    // Drain any pending Serial frames and dispatch to ConfigProtocol.
+    // The save callback is the only firmware ↔ ConfigProtocol bridge:
+    // ConfigProtocol stays pure C++17 (test_config_protocol runs on
+    // native), and we wire it to the Arduino-only ConfigStore here.
+    rlr::serial_console::tick(g_cfg, g_transport,
+        [](const rlr::Config& c) -> bool {
+            return rlr::config_store::save(c);
+        });
 
     delay(2);
 }
