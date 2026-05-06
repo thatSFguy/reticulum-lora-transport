@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "Config.h"
+#include "ConfigStore.h"
 #include "Radio.h"
 #include "Storage.h"
 
@@ -136,6 +137,16 @@ void setup() {
     if (!rlr::storage::init()) {
         Serial.println(F("rlr: WARNING — storage init failed; "
                           "identity will not persist"));
+    }
+
+    // Load persisted Config if present, otherwise stick with the
+    // hardcoded defaults from Config.h. CRC mismatch / version
+    // bump / missing file all fall through to defaults — diagnostic
+    // only.
+    if (rlr::config_store::load(g_cfg)) {
+        Serial.println(F("rlr: config loaded from flash"));
+    } else {
+        Serial.println(F("rlr: no valid config — using defaults"));
     }
 
     // Radio bring-up MUST precede identity generation — random_byte()
