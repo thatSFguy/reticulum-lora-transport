@@ -116,6 +116,44 @@ public:
     // drops requests for our own destinations.
     void set_announce_seed_fn(AnnounceSeedFn fn);
 
+    // Build and emit an announce for a registered local destination.
+    // Returns true if emitted, false if the dest_hash isn't local or
+    // the announce_seed_fn isn't set.
+    //
+    //   only_on : if non-null, emit only on that interface;
+    //             otherwise emit on every registered interface.
+    //   path_response : sets the outer context byte to PATH_RESPONSE.
+    //
+    // Bypasses the announce-cap budget — these are caller-driven
+    // emits (path-response answers, scheduled re-announces), not
+    // queued for fairness.
+    bool emit_announce_for_local(const Bytes& dest_hash,
+                                 const Bytes& app_data    = {},
+                                 bool path_response       = false,
+                                 Interface* only_on       = nullptr);
+
+    // Provider for app_data computed at emission time. Called every
+    // time a scheduled announce fires. Returning an empty Bytes is
+    // valid (= no app_data).
+    using AppDataProvider = std::function<Bytes()>;
+
+    // Schedule a periodic announce for a local destination. Caller
+    // already registered the destination via register_local_destination.
+    //   period_ms        — interval between emits
+    //   fn               — called each emit to get app_data; nullable
+    //   initial_offset_ms — first emit fires when tick(now_ms) sees
+    //                      now_ms >= initial_offset_ms (default = 0,
+    //                      i.e. on the very next tick).
+    //
+    // The schedule is stored with absolute "next_emit_ms"; tick()
+    // drives emission. Multiple schedules may target the same
+    // dest_hash with different periods (telemetry beacon's
+    // 5min "alive" + 2h "full" pattern).
+    void schedule_announce(const Bytes& dest_hash,
+                           uint64_t period_ms,
+                           AppDataProvider fn,
+                           uint64_t initial_offset_ms = 0);
+
     // Introspection — used by tests and status pages.
     const Identity&       local_identity()     const { return _local; }
     bool                  transport_enabled()  const { return _transport_enabled; }
@@ -167,6 +205,7 @@ public:
         uint64_t link_data_unvalidated    = 0;  // link not yet established
         uint64_t path_requests_local_answered = 0; // §7.2 branch 1 — local dest match
         uint64_t path_requests_local_no_seed  = 0; // §7.2 branch 1 dropped (no seed fn)
+        uint64_t scheduled_announces_emitted  = 0; // schedule_announce-driven emits
     };
     const Stats& stats() const { return _stats; }
 
@@ -189,7 +228,18 @@ private:
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
     AnnounceSeedFn _announce_seed_fn;
+
+    struct ScheduledAnnounce {
+        Bytes           dest_hash;
+        uint64_t        period_ms;
+        uint64_t        next_emit_ms;
+        AppDataProvider fn;
+    };
+    std::vector<ScheduledAnnounce> _scheduled_announces;
+
     Stats _stats;
+
+    void drive_scheduled_announces(uint64_t now_ms);
 
     void handle_announce(Interface* received_on, const Packet& packet,
                          uint64_t now_ms);

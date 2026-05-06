@@ -1321,6 +1321,153 @@ void test_local_destination_registry() {
     TEST_ASSERT_TRUE(t.is_local_destination(h2));
 }
 
+// emit_announce_for_local on every interface when only_on is null.
+void test_emit_announce_for_local_fans_to_all_interfaces() {
+    Transport t(bob_identity(), false);
+    StubInterface a, b, c;
+    t.register_interface(&a);
+    t.register_interface(&b);
+    t.register_interface(&c);
+
+    rns::Destination d(bob_identity(), "test.fanout");
+    t.register_local_destination(d);
+    t.set_announce_seed_fn([]() {
+        return rns::AnnounceSeed{ Bytes::from_hex("0a0a0a0a0a"), 1700000000ULL };
+    });
+
+    bool ok = t.emit_announce_for_local(d.destination_hash());
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_UINT(1, a.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, b.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, c.emitted.size());
+
+    // Each iface received the same wire bytes (same seed → same output).
+    TEST_ASSERT_EQUAL_STRING(a.emitted[0].to_hex().c_str(),
+                             b.emitted[0].to_hex().c_str());
+}
+
+// emit_announce_for_local with only_on hits exactly one interface.
+void test_emit_announce_for_local_only_on() {
+    Transport t(bob_identity(), false);
+    StubInterface a, b;
+    t.register_interface(&a);
+    t.register_interface(&b);
+    rns::Destination d(bob_identity(), "test.only_on");
+    t.register_local_destination(d);
+    t.set_announce_seed_fn([]() {
+        return rns::AnnounceSeed{ Bytes::from_hex("0b0b0b0b0b"), 1700000000ULL };
+    });
+
+    bool ok = t.emit_announce_for_local(d.destination_hash(),
+                                        /*app_data=*/{},
+                                        /*path_response=*/false,
+                                        /*only_on=*/&b);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_UINT(0, a.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, b.emitted.size());
+}
+
+// Without a seed_fn, emit_announce_for_local returns false cleanly.
+void test_emit_announce_for_local_without_seed_returns_false() {
+    Transport t(bob_identity(), false);
+    StubInterface a;
+    t.register_interface(&a);
+    rns::Destination d(bob_identity(), "test.no_seed");
+    t.register_local_destination(d);
+    // seed_fn intentionally not set
+
+    bool ok = t.emit_announce_for_local(d.destination_hash());
+    TEST_ASSERT_FALSE(ok);
+    TEST_ASSERT_EQUAL_UINT(0, a.emitted.size());
+}
+
+// Unknown dest_hash → false.
+void test_emit_announce_for_local_unknown_dest() {
+    Transport t(bob_identity(), false);
+    StubInterface a;
+    t.register_interface(&a);
+    t.set_announce_seed_fn([]() {
+        return rns::AnnounceSeed{ Bytes::from_hex("0102030405"), 1700000000ULL };
+    });
+
+    Bytes never_registered = Bytes::from_hex("00112233445566778899aabbccddeeff");
+    TEST_ASSERT_FALSE(t.emit_announce_for_local(never_registered));
+    TEST_ASSERT_EQUAL_UINT(0, a.emitted.size());
+}
+
+// schedule_announce fires at multiples of period_ms.
+void test_schedule_announce_fires_at_period_boundaries() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+    rns::Destination d(bob_identity(), "test.schedule");
+    t.register_local_destination(d);
+    t.set_announce_seed_fn([]() {
+        return rns::AnnounceSeed{ Bytes::from_hex("0102030405"), 1700000000ULL };
+    });
+
+    t.schedule_announce(d.destination_hash(),
+                        /*period_ms=*/1000,
+                        /*fn=*/nullptr,
+                        /*initial_offset_ms=*/0);
+
+    // tick(0) — first emit (next_emit_ms started at 0).
+    t.tick(0);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().scheduled_announces_emitted);
+
+    // tick(500) — well before next period boundary.
+    t.tick(500);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().scheduled_announces_emitted);
+
+    // tick(1000) — at next period.
+    t.tick(1000);
+    TEST_ASSERT_EQUAL_UINT(2, t.stats().scheduled_announces_emitted);
+
+    // tick(2500) — past two more boundaries; the scheduler advances
+    // by `period_ms` from `now_ms`, so tick(2500) consumes one slot
+    // and the next fires at 3500.
+    t.tick(2500);
+    TEST_ASSERT_EQUAL_UINT(3, t.stats().scheduled_announces_emitted);
+
+    TEST_ASSERT_EQUAL_UINT(3, iface.emitted.size());
+}
+
+// AppDataProvider is called fresh every emit (data captured at emit
+// time, not at registration time).
+void test_schedule_announce_calls_provider_each_emit() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+    rns::Destination d(bob_identity(), "test.provider");
+    t.register_local_destination(d);
+    t.set_announce_seed_fn([]() {
+        return rns::AnnounceSeed{ Bytes::from_hex("0102030405"), 1700000000ULL };
+    });
+
+    int call_count = 0;
+    t.schedule_announce(d.destination_hash(),
+                        /*period_ms=*/100,
+                        [&]() {
+                            call_count++;
+                            return Bytes::from_hex(
+                                (call_count == 1) ? "aa" : "bb");
+                        });
+
+    t.tick(0);     // emit 1, provider called → "aa"
+    t.tick(100);   // emit 2, provider called → "bb"
+    TEST_ASSERT_EQUAL_INT(2, call_count);
+    TEST_ASSERT_EQUAL_UINT(2, iface.emitted.size());
+
+    // Each emit's wire bytes carry the provider's app_data at the
+    // tail. Body offset for HEADER_1 announce, no ratchet:
+    //   pub(64) + name_hash(10) + random_hash(10) + signature(64)
+    //   = 148 bytes; app_data starts at body[148:].
+    Packet e1 = Packet::from_wire_bytes(iface.emitted[0]);
+    Packet e2 = Packet::from_wire_bytes(iface.emitted[1]);
+    TEST_ASSERT_EQUAL_STRING("aa", e1.data().slice(148).to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING("bb", e2.data().slice(148).to_hex().c_str());
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -1380,6 +1527,12 @@ int main(int argc, char** argv) {
     RUN_TEST(test_path_request_branch_1_local_destination);
     RUN_TEST(test_path_request_local_no_seed_drops);
     RUN_TEST(test_local_destination_registry);
+    RUN_TEST(test_emit_announce_for_local_fans_to_all_interfaces);
+    RUN_TEST(test_emit_announce_for_local_only_on);
+    RUN_TEST(test_emit_announce_for_local_without_seed_returns_false);
+    RUN_TEST(test_emit_announce_for_local_unknown_dest);
+    RUN_TEST(test_schedule_announce_fires_at_period_boundaries);
+    RUN_TEST(test_schedule_announce_calls_provider_each_emit);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

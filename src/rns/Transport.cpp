@@ -47,6 +47,57 @@ void Transport::set_announce_seed_fn(AnnounceSeedFn fn) {
     _announce_seed_fn = std::move(fn);
 }
 
+bool Transport::emit_announce_for_local(const Bytes& dest_hash,
+                                        const Bytes& app_data,
+                                        bool path_response,
+                                        Interface* only_on) {
+    auto it = _local_destinations.find(key_of(dest_hash));
+    if (it == _local_destinations.end()) return false;
+    if (!_announce_seed_fn) return false;
+
+    AnnounceSeed seed = _announce_seed_fn();
+    Bytes wire = it->second.build_announce(seed.random_prefix,
+                                           seed.unix_seconds,
+                                           app_data,
+                                           /*ratchet_pub=*/{},
+                                           path_response);
+
+    if (only_on) {
+        only_on->transmit_now(wire);
+    } else {
+        for (Interface* iface : _interfaces) iface->transmit_now(wire);
+    }
+    return true;
+}
+
+void Transport::schedule_announce(const Bytes& dest_hash, uint64_t period_ms,
+                                  AppDataProvider fn,
+                                  uint64_t initial_offset_ms) {
+    ScheduledAnnounce s;
+    s.dest_hash    = dest_hash;
+    s.period_ms    = period_ms;
+    s.next_emit_ms = initial_offset_ms;
+    s.fn           = std::move(fn);
+    _scheduled_announces.push_back(std::move(s));
+}
+
+void Transport::drive_scheduled_announces(uint64_t now_ms) {
+    for (auto& s : _scheduled_announces) {
+        if (s.next_emit_ms > now_ms) continue;
+        Bytes app_data = s.fn ? s.fn() : Bytes{};
+        if (emit_announce_for_local(s.dest_hash, app_data,
+                                    /*path_response=*/false,
+                                    /*only_on=*/nullptr)) {
+            _stats.scheduled_announces_emitted++;
+        }
+        // Advance even on emit failure — otherwise a missing seed_fn
+        // would re-fire every tick. The next attempt is one period
+        // later regardless.
+        s.next_emit_ms = (s.period_ms > 0) ? now_ms + s.period_ms
+                                           : UINT64_MAX;
+    }
+}
+
 const Bytes* Transport::public_key_for(const Bytes& dest_hash) const {
     auto it = _known_destinations.find(key_of(dest_hash));
     return (it == _known_destinations.end()) ? nullptr : &it->second;
@@ -64,6 +115,7 @@ Bytes Transport::dedup_hash(const Packet& p) {
 
 void Transport::tick(uint64_t now_ms) {
     drive_announce_rebroadcast(now_ms);
+    drive_scheduled_announces(now_ms);
     for (Interface* i : _interfaces) i->tick(now_ms);
     _paths.evict_expired(now_ms);
     _reverse_table.evict_aged(now_ms);
@@ -332,20 +384,16 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     // by building a fresh path-response announce. This MUST run
     // before branch 2 because we're authoritative for our own
     // destinations and shouldn't punt to a cached path entry.
-    auto local_it = _local_destinations.find(key_of(target));
-    if (local_it != _local_destinations.end()) {
+    if (is_local_destination(target)) {
         if (!_announce_seed_fn) {
             _stats.path_requests_local_no_seed++;
             return;
         }
-        const Destination& local = local_it->second;
-        AnnounceSeed seed = _announce_seed_fn();
-        Bytes wire = local.build_announce(seed.random_prefix,
-                                          seed.unix_seconds,
-                                          /*app_data=*/{},
-                                          /*ratchet_pub=*/{},
-                                          /*path_response=*/true);
-        if (received_on) received_on->transmit_now(wire);
+        // app_data is empty for path-response in this slice. Telemetry
+        // and other apps that want app_data fidelity in path-responses
+        // can extend Destination to track its "current" payload later.
+        emit_announce_for_local(target, /*app_data=*/{},
+                                /*path_response=*/true, received_on);
         _stats.path_requests_local_answered++;
         _stats.path_requests_answered++;
         return;
