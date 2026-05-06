@@ -122,6 +122,20 @@ Bytes synth_proof_packet(const Bytes& truncated_hash, const Bytes& body,
                                  Packet::CONTEXT_NONE, body);
 }
 
+// Build a §7.1 path-request DATA packet. Layout depends on whether
+// `transport_id` is supplied (transport-mode originator vs leaf).
+// flags: HEADER_1 (00) | BROADCAST (0) | PLAIN (10) | DATA (00) = 0x08
+Bytes synth_path_request(const Bytes& target, const Bytes& tag,
+                         const Bytes* transport_id = nullptr) {
+    Bytes body;
+    body.append(target);
+    if (transport_id) body.append(*transport_id);
+    body.append(tag);
+    return Packet::pack_header_1(/*flags=*/0x08, /*hops=*/0,
+                                 Transport::path_request_destination_hash(),
+                                 Packet::CONTEXT_NONE, body);
+}
+
 } // namespace
 
 void test_inbound_validates_and_caches_announce() {
@@ -718,6 +732,165 @@ void test_reverse_table_aging() {
     TEST_ASSERT_EQUAL_UINT(0, t.reverse_table().size());
 }
 
+// §7.1 — well-known path-request destination_hash is the constant
+// from §1.2 / §1.4.3. Verifies the SHA256(name_hash)[:16] derivation.
+void test_path_request_destination_hash_is_canonical() {
+    TEST_ASSERT_EQUAL_STRING(
+        "6b9f66014d9853faab220fba47d02761",
+        Transport::path_request_destination_hash().to_hex().c_str());
+}
+
+// §7.2.3 branch 2 — transit relay answers a known target by replaying
+// the cached announce wire with context byte set to PATH_RESPONSE on
+// the interface the request arrived on.
+void test_path_request_for_known_target_emits_path_response() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface req_iface, learn_iface;
+    t.register_interface(&req_iface);
+    t.register_interface(&learn_iface);
+
+    // Learn alice via learn_iface.
+    t.inbound(&learn_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    Bytes tag = Bytes::from_hex("11111111111111111111111111111111");
+    Bytes pr  = synth_path_request(alice_dest, tag);
+
+    req_iface.emitted.clear();
+    learn_iface.emitted.clear();
+
+    t.inbound(&req_iface, pr, 2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_received);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_answered);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_unanswered);
+
+    // Path-response went out the way the request came in (req_iface).
+    TEST_ASSERT_EQUAL_UINT(1, req_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, learn_iface.emitted.size());
+
+    Packet emitted = Packet::from_wire_bytes(req_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.packet_type() == Packet::PacketType::ANNOUNCE);
+    TEST_ASSERT_EQUAL_UINT8(Packet::CONTEXT_PATH_RESPONSE, emitted.context());
+    TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH,
+                             emitted.destination_hash().to_hex().c_str());
+
+    // Body bytes (post-context) match the cached announce — the body
+    // is the immutable signed-data carrier; only the outer context
+    // byte was mutated.
+    Bytes cached = t.path_table().get(alice_dest)->announce_wire;
+    TEST_ASSERT_EQUAL_UINT(cached.size(), req_iface.emitted[0].size());
+    for (size_t i = 19; i < cached.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT8(cached[i], req_iface.emitted[0][i]);
+    }
+}
+
+// §7.2.3 branch 5 — leaf (transport_enabled=false) doesn't fulfil
+// path requests for non-local destinations. Drop, no emit.
+void test_path_request_leaf_does_not_answer() {
+    Transport t(bob_identity(), /*transport_enabled=*/false);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    // Even with the path entry populated, a leaf shouldn't answer.
+    t.inbound(&iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+
+    Bytes tag = Bytes::from_hex("22222222222222222222222222222222");
+    Bytes pr  = synth_path_request(Bytes::from_hex(ALICE_DEST_HASH), tag);
+
+    iface.emitted.clear();
+    t.inbound(&iface, pr, 2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_received);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_answered);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_unanswered);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// Path request for a target we don't have a path entry for — drop.
+void test_path_request_for_unknown_target_drops() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes unknown = Bytes::from_hex("0123456789abcdef0123456789abcdef");
+    Bytes tag     = Bytes::from_hex("33333333333333333333333333333333");
+    Bytes pr      = synth_path_request(unknown, tag);
+    t.inbound(&iface, pr, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_received);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_answered);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_unanswered);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// §7.2.1 — path requests with no tag bytes (16-byte body, just the
+// target_dest_hash) are silently dropped.
+void test_path_request_tagless_drop() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes target = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes pr     = Packet::pack_header_1(
+        /*flags=*/0x08, /*hops=*/0,
+        Transport::path_request_destination_hash(),
+        Packet::CONTEXT_NONE, target);  // body = just 16 bytes target, no tag
+    t.inbound(&iface, pr, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_tagless);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_received);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_answered);
+}
+
+// §7.2.2 — duplicate (target||tag) drops on the second arrival.
+// Use different transport_id slots to bypass §13.4 dedup so we
+// exercise the pr_tags ring directly.
+void test_path_request_dedup_by_target_and_tag() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+    t.inbound(&iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+
+    Bytes target = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes tag    = Bytes::from_hex("44444444444444444444444444444444");
+    Bytes tid_a  = Bytes::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    Bytes tid_b  = Bytes::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+    Bytes pr1 = synth_path_request(target, tag, &tid_a);
+    Bytes pr2 = synth_path_request(target, tag, &tid_b);  // different body, same target+tag
+
+    iface.emitted.clear();
+    t.inbound(&iface, pr1, 2000);
+    t.inbound(&iface, pr2, 2001);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_received);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_deduped);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_answered);
+    TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());
+}
+
+// §7.2.1 — transport-mode originator request (target || transport_id ||
+// tag) parses correctly and answers.
+void test_path_request_transport_mode_payload_parses() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+    t.inbound(&iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+
+    Bytes target = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes tid    = Bytes::from_hex("cccccccccccccccccccccccccccccccc");  // 16 bytes
+    Bytes tag    = Bytes::from_hex("55555555555555555555555555555555");
+    Bytes pr     = synth_path_request(target, tag, &tid);
+
+    iface.emitted.clear();
+    t.inbound(&iface, pr, 2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_received);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_answered);
+    TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -757,6 +930,13 @@ int main(int argc, char** argv) {
     RUN_TEST(test_proof_orphaned_when_no_reverse_entry);
     RUN_TEST(test_proof_dropped_when_arriving_on_wrong_interface);
     RUN_TEST(test_reverse_table_aging);
+    RUN_TEST(test_path_request_destination_hash_is_canonical);
+    RUN_TEST(test_path_request_for_known_target_emits_path_response);
+    RUN_TEST(test_path_request_leaf_does_not_answer);
+    RUN_TEST(test_path_request_for_unknown_target_drops);
+    RUN_TEST(test_path_request_tagless_drop);
+    RUN_TEST(test_path_request_dedup_by_target_and_tag);
+    RUN_TEST(test_path_request_transport_mode_payload_parses);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

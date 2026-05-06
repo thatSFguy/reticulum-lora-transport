@@ -14,6 +14,18 @@ Transport::Transport(Identity local_identity, bool transport_enabled)
     : _local(std::move(local_identity)),
       _transport_enabled(transport_enabled) {}
 
+const Bytes& Transport::path_request_destination_hash() {
+    // §1.4.3 PLAIN destination recipe: SHA256(name_hash)[:16] when
+    // identity == None. name_hash itself is SHA256(name)[:10] per §1.2.
+    // Result for "rnstransport.path.request" is the constant
+    // 6b9f66014d9853faab220fba47d02761 (verified by tests).
+    static const Bytes hash = []() {
+        Bytes nh = Identity::name_hash("rnstransport.path.request");
+        return crypto::sha256(nh).slice(0, 16);
+    }();
+    return hash;
+}
+
 void Transport::register_interface(Interface* iface) {
     _interfaces.push_back(iface);
 }
@@ -50,6 +62,7 @@ void Transport::tick(uint64_t now_ms) {
     _paths.evict_expired(now_ms);
     _reverse_table.evict_aged(now_ms);
     _hashlist.purge_if_over_cap();
+    _pr_tags.purge_if_over_cap();
 }
 
 void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
@@ -100,9 +113,15 @@ void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_
     // handing them to us).
     if (packet.packet_type() == Packet::PacketType::ANNOUNCE) {
         handle_announce(received_on, packet, now_ms);
-    } else if (packet.packet_type() == Packet::PacketType::DATA &&
-               packet.destination_type() != Packet::DestinationType::LINK) {
-        handle_data_forward(received_on, packet, now_ms);
+    } else if (packet.packet_type() == Packet::PacketType::DATA) {
+        // §7.1 path-request destination short-circuits the regular
+        // DATA forward path — these are PLAIN BROADCAST packets
+        // addressed to a well-known constant, not via transport_id.
+        if (packet.destination_hash() == path_request_destination_hash()) {
+            handle_path_request(received_on, packet);
+        } else if (packet.destination_type() != Packet::DestinationType::LINK) {
+            handle_data_forward(received_on, packet, now_ms);
+        }
     } else if (packet.packet_type() == Packet::PacketType::PROOF) {
         handle_proof_forward(received_on, packet);
     }
@@ -257,6 +276,78 @@ void Transport::handle_proof_forward(Interface* received_on, const Packet& packe
     // packet wire as-is (matches §12.5.3's "flags + new_hops + rest").
     fwd->transmit_now(packet.wire_bytes());
     _stats.proof_forwarded++;
+}
+
+void Transport::handle_path_request(Interface* received_on, const Packet& packet) {
+    // §7.2.1 — payload parse. Two valid layouts by length:
+    //   16-32 bytes:  target(16) || tag(rest, capped to 16)        — leaf request
+    //   33+   bytes:  target(16) || transport_id(16) || tag(rest)  — transport originator
+    // Tagless requests (exactly 16 bytes) are dropped per spec.
+    const Bytes& body = packet.data();
+    if (body.size() < 16) return;
+
+    Bytes target = body.slice(0, 16);
+    Bytes tag;
+    if (body.size() > 32) {
+        // Originator embedded transport_id; tag follows.
+        const size_t tag_len = std::min<size_t>(16, body.size() - 32);
+        tag = body.slice(32, tag_len);
+    } else if (body.size() > 16) {
+        // Leaf form: tag immediately follows target.
+        const size_t tag_len = std::min<size_t>(16, body.size() - 16);
+        tag = body.slice(16, tag_len);
+    }
+    if (tag.size() == 0) {
+        _stats.path_requests_tagless++;
+        return;
+    }
+
+    _stats.path_requests_received++;
+
+    // §7.2.2 — dedup keyed by target_dest_hash || tag. Same tag bytes
+    // for different targets are distinct; same target+tag from a
+    // retransmit drops here.
+    Bytes dedup_key;
+    dedup_key.append(target);
+    dedup_key.append(tag);
+    if (!_pr_tags.insert(dedup_key)) {
+        _stats.path_requests_deduped++;
+        return;
+    }
+
+    // §7.2.3 dispatch. We implement only branches 2 and 5 in this
+    // first slice. Branch 1 (local destinations) and branches 3/4
+    // (forward path-request to other interfaces with fresh tag) need
+    // a local-destinations registry and outbound packet construction.
+    const PathEntry* path = _paths.get(target);
+    if (!path || !_transport_enabled) {
+        _stats.path_requests_unanswered++;
+        return;
+    }
+
+    emit_path_response(received_on, *path);
+    _stats.path_requests_answered++;
+}
+
+void Transport::emit_path_response(Interface* out, const PathEntry& path) {
+    if (!out) return;
+    if (path.announce_wire.size() < 19) return;  // not even HEADER_1 minimum
+
+    Bytes wire = path.announce_wire;
+
+    // §7.2.4 — outer context byte → PATH_RESPONSE. Offset depends on
+    // header form. Signature is over body + outer dest_hash (§4.2),
+    // not context, so this mutation doesn't break validation.
+    const bool is_h2 = ((wire[0] >> 6) & 0x03) != 0;
+    const size_t ctx_offset = is_h2 ? 34 : 18;
+    if (wire.size() <= ctx_offset) return;
+    wire[ctx_offset] = Packet::CONTEXT_PATH_RESPONSE;
+
+    // §7.2.5 PATH_REQUEST_GRACE timing is deferred — we respond
+    // immediately. transmit_now bypasses the announce-cap budget,
+    // which matches branch 2's "this is a path-resolver answer, not
+    // a periodic re-announce" semantic.
+    out->transmit_now(wire);
 }
 
 bool Transport::cache_validated_announce(const ValidatedAnnounce& va,

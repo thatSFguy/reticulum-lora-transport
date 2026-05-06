@@ -66,6 +66,11 @@ public:
     // (§9.5), or §4.5 validation failure.
     void inbound(Interface* received_on, const Bytes& wire, uint64_t now_ms);
 
+    // §7.1 — well-known PLAIN destination_hash for path-request
+    // packets: SHA256(SHA256("rnstransport.path.request")[:10])[:16].
+    // Constant value `6b9f66014d9853faab220fba47d02761`.
+    static const Bytes& path_request_destination_hash();
+
     // Periodic driver. Walks each registered interface's `tick()`,
     // evicts path entries past their `expires_ms`, and purges the
     // hashlist if over cap (§13.4).
@@ -111,16 +116,27 @@ public:
         uint64_t proof_forwarded        = 0;  // §12.5.3 PROOF emits
         uint64_t proof_orphaned         = 0;  // PROOF whose dest_hash isn't in reverse_table
         uint64_t proof_wrong_interface  = 0;  // PROOF arrived on the wrong outbound_if
+        uint64_t path_requests_received   = 0;  // valid §7.1 path-request packets
+        uint64_t path_requests_tagless    = 0;  // §7.2.1 — dropped, no tag bytes
+        uint64_t path_requests_deduped    = 0;  // §7.2.2 — (target||tag) seen before
+        uint64_t path_requests_answered   = 0;  // §7.2.3 branch 2 emit
+        uint64_t path_requests_unanswered = 0;  // unknown target / leaf with no local match
     };
     const Stats& stats() const { return _stats; }
 
 private:
+    // §7.2.2 — `Transport.max_pr_tags` default 32000. We reuse
+    // PacketHashList — same primitive: bounded set, dedup-on-insert,
+    // half-purge on cap.
+    static constexpr size_t MAX_PR_TAGS = 32000;
+
     Identity        _local;
     bool            _transport_enabled;
     PathTable       _paths;
     PacketHashList  _hashlist;
     AnnounceTable   _announce_table;
     ReverseTable    _reverse_table;
+    PacketHashList  _pr_tags{MAX_PR_TAGS};
     std::unordered_map<std::string, Bytes> _known_destinations;  // dest_hash → 64B pub
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
@@ -142,6 +158,19 @@ private:
     // verifies the PROOF arrived on the matching outbound_if, and
     // re-emits on received_if.
     void handle_proof_forward(Interface* received_on, const Packet& packet);
+
+    // §7.2 — handle DATA packets addressed to the well-known
+    // path_request_destination_hash. Parses payload per §7.2.1, dedups
+    // by (target||tag) per §7.2.2, dispatches per §7.2.3 (branch 2 +
+    // branch 5 only — local destinations and request-forwarding TBD).
+    void handle_path_request(Interface* received_on, const Packet& packet);
+
+    // Re-emit the cached announce for `path` on `out` with the outer
+    // context byte mutated to PATH_RESPONSE (§7.2.4). Wire bytes
+    // otherwise unchanged — including the hops byte, which carries
+    // the cached distance from us. The receiver bumps it on inbound
+    // and learns the destination is one further than that.
+    void emit_path_response(Interface* out, const PathEntry& path);
 
     // §4.5 step 6.1 — record a freshly-validated announce's pubkey,
     // and update the path entry (timestamp / hops / next_hop /
