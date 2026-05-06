@@ -345,6 +345,24 @@ static int _tx_frame(uint8_t header, const uint8_t* payload, size_t len) {
     if (state != RADIOLIB_ERR_NONE) {
         Serial.print("Radio: TX error code=");
         Serial.println(state);
+        return state;
+    }
+
+    // Symmetric with the RX log so successful TX is visible.
+    Serial.print("Radio: TX ");
+    Serial.print(len);
+    Serial.print("B");
+    if (len > 0) {
+        uint8_t pt  = payload[0] & 0x03;
+        uint8_t ctx = (payload[0] >> 5) & 0x01;
+        const char* pt_name = "UNK";
+        switch (pt) { case 0: pt_name="DATA"; break; case 1: pt_name="ANNOUNCE"; break; case 2: pt_name="LINKREQ"; break; case 3: pt_name="PROOF"; break; }
+        Serial.print("  pt=");
+        Serial.print(pt_name);
+        Serial.print("  ctx=");
+        Serial.println(ctx);
+    } else {
+        Serial.println();
     }
     return state;
 }
