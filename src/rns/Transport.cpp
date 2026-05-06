@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <stdexcept>
 
 #include "rns/Crypto.h"
 #include "rns/Interface.h"
