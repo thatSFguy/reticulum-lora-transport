@@ -11,8 +11,10 @@
 
 #include <utility>
 
+#include "Battery.h"
 #include "Config.h"
 #include "ConfigStore.h"
+#include "Led.h"
 #include "Radio.h"
 #include "Storage.h"
 
@@ -85,10 +87,7 @@ rns::telemetry::Snapshot make_telemetry_snapshot() {
         s.lon = static_cast<float>(g_cfg.longitude_udeg) / 1000000.0f;
     }
 
-    // Battery read: TBD when board-specific ADC driver lands. Faketec
-    // exposes BATT_PIN through its header; the multiplier in
-    // g_cfg.batt_mult will scale ADC raw → mV. Placeholder 0 for now.
-    s.battery_mv = 0;
+    s.battery_mv = rlr::battery::read_mv(g_cfg.batt_mult);
 
     if (g_transport) {
         s.route_count = static_cast<uint16_t>(
@@ -130,6 +129,9 @@ void setup() {
     Serial.begin(115200);
     delay(50);
     Serial.println(F("rlr: setup begin"));
+
+    rlr::led::init();
+    rlr::battery::init();
 
     // Storage MUST mount before identity load — load_or_generate
     // calls rlr::storage::load_file. Failures here are non-fatal
@@ -208,7 +210,9 @@ void setup() {
 void loop() {
     if (!g_transport) return;
 
-    g_transport->tick(millis());
+    const uint64_t now = millis();
+    rlr::led::tick(now);
+    g_transport->tick(now);
 
     // Drain any RX from the radio and route to Transport.inbound. The
     // radio's read_pending handles RNode split-packet reassembly
@@ -218,7 +222,7 @@ void loop() {
         int n = rlr::radio::read_pending(buf, sizeof(buf));
         if (n > 0) {
             rns::Bytes wire(buf, static_cast<size_t>(n));
-            g_transport->inbound(g_lora_iface, wire, millis());
+            g_transport->inbound(g_lora_iface, wire, now);
         }
     }
 
