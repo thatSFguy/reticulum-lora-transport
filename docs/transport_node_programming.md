@@ -246,7 +246,7 @@ Single source of truth: `src/Config.h` in the firmware repo. When that file chan
 | `bw_hz` | uint32 | 250000 | 7800..500000 | LoRa bandwidth. SX1262-supported steps: 7.81, 10.42, 15.63, 20.83, 31.25, 41.67, 62.5, 125, 250, 500 kHz. |
 | `sf` | uint8 | 10 | 5..12 | LoRa spreading factor. Higher SF = longer range, less throughput. SF10 = our deployment default. |
 | `cr` | uint8 | 5 | 5..8 | LoRa coding-rate denominator. 5 = 4/5, 6 = 4/6, 7 = 4/7, 8 = 4/8. |
-| `txp_dbm` | int8 | 22 | -9..+22 | TX power at the SX1262 core pin. Modules with external PA add gain on top (Faketec's E22 → ~30 dBm radiated at +22 core). |
+| `txp_dbm` | int8 | 22 | -9..+22 | TX power at the SX1262 core pin. Modules with external PA add gain on top (ProMicroDIY's E22 → ~30 dBm radiated at +22 core). |
 | `lat_udeg` | int32 | 0 | ±90,000,000 | Latitude in microdegrees (deg × 1e6). 0 = unset (telemetry beacon emits nil lat). |
 | `lon_udeg` | int32 | 0 | ±180,000,000 | Longitude in microdegrees. 0 = unset. |
 | `alt_m` | int32 | 0 | n/a | Altitude in meters above sea level. 0 = unset. |

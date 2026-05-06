@@ -55,7 +55,7 @@ test/native/                      # pio test -e native — host-side, Unity
 ## Build envs
 
 - `native` — host tests, Unity framework
-- `Faketec` / `RAK4631` / `XIAO_nRF52840` / `Heltec_T114` / `RAK3401` — board envs (added as the stack reaches them)
+- `ProMicroDIY` / `RAK4631` / `XIAO_nRF52840` / `Heltec_T114` / `RAK3401` — board envs (added as the stack reaches them)
 
 ## Naming conventions
 

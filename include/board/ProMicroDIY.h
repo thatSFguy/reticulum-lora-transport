@@ -1,14 +1,14 @@
 #pragma once
 // =====================================================================
-//  include/board/Faketec.h
+//  include/board/ProMicroDIY.h
 //  ------------------------------------------------------------------
 //  Nice!Nano-style nRF52840 ProMicro clone + Ebyte E22-900M30S
 //  (SX1262, TCXO, external RF switch, ~30 dBm via external PA).
 //
-//  ALL Faketec-specific constants live in this file. Nothing in
-//  src/ ever uses `#if BOARD_MODEL == BOARD_Faketec`. platformio.ini
+//  ALL ProMicroDIY-specific constants live in this file. Nothing in
+//  src/ ever uses `#if BOARD_MODEL == BOARD_ProMicroDIY`. platformio.ini
 //  pre-includes this header for every compilation unit in the
-//  [env:Faketec] build via `-include include/board/Faketec.h`.
+//  [env:ProMicroDIY] build via `-include include/board/ProMicroDIY.h`.
 //
 //  Authoritative pin map source: Meshtastic DIY variant
 //  `nrf52840/diy/nrf52_promicro_diy_tcxo/variant.h`. Cross-verified
@@ -17,11 +17,11 @@
 // =====================================================================
 
 // ---- Board identity ------------------------------------------------
-#define BOARD_NAME              "Faketec"
+#define BOARD_NAME              "ProMicroDIY"
 #define BOARD_MANUFACTURER      "DIY / Nice!Nano clone"
-#define BOARD_Faketec           0x52
-#define PRODUCT_Faketec         0x18
-#define MODEL_Faketec           0x18
+#define BOARD_ProMicroDIY       0x52
+#define PRODUCT_ProMicroDIY     0x18
+#define MODEL_ProMicroDIY       0x18
 
 // ---- Capability flags ----------------------------------------------
 #define HAS_TCXO                1
@@ -80,7 +80,7 @@
 
 // ---- Default config values for first boot -------------------------
 // These are what flashes into /config_store_0.dat the very first time
-// the firmware boots on a freshly-flashed Faketec. The user then
+// the firmware boots on a freshly-flashed ProMicroDIY. The user then
 // overrides via the webflasher or serial console. Pick safe,
 // universally-legal defaults here — the webflasher will force region
 // selection before the user actually commits.
@@ -97,4 +97,4 @@
 #define DEFAULT_CONFIG_CR               5
 #define DEFAULT_CONFIG_TXP_DBM          22           // TEMP: matches current mesh (SX1262 core; ext PA → ~30 dBm)
 #define DEFAULT_CONFIG_BATT_MULT        1.284f       // field-calibrated on USB @ 5 V
-#define DEFAULT_CONFIG_DISPLAY_NAME     "Rptr-Faketec"
+#define DEFAULT_CONFIG_DISPLAY_NAME     "Rptr-ProMicroDIY"

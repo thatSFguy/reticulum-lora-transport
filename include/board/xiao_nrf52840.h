@@ -7,7 +7,7 @@
 //
 //  The Wio-SX1262 daughter board carries an SX1262 with TCXO, an
 //  external LNA gated by RXEN (same topology as the Ebyte E22 on the
-//  Faketec), and DIO2-as-RF-switch for the TX path. No VEXT gate —
+//  ProMicroDIY), and DIO2-as-RF-switch for the TX path. No VEXT gate —
 //  the radio runs directly off the XIAO's 3V3 rail.
 //
 //  Pin values below are the pca10056 Arduino pin numbers (P0.x == x,
@@ -76,7 +76,7 @@
 #define PIN_LORA_RESET          28    // P0.28
 #define PIN_LORA_BUSY           29    // P0.29
 #define PIN_LORA_DIO1           3     // P0.03 — IRQ line
-#define PIN_LORA_RXEN           5     // P0.05 — external LNA enable (same as Faketec topology)
+#define PIN_LORA_RXEN           5     // P0.05 — external LNA enable (same as ProMicroDIY topology)
 #define PIN_LORA_TXEN           -1    // handled by DIO2_AS_RF_SWITCH
 
 // Power / peripherals

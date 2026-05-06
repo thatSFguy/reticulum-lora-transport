@@ -23,7 +23,7 @@ Successor to `reticulum-lora-repeater`. The previous firmware wrapped `microReti
 
 ```sh
 pio test -e native    # unit tests pinned to reticulum-specifications/test-vectors/
-pio run  -e Faketec   # firmware build (board envs land as the stack reaches them)
+pio run  -e ProMicroDIY  # firmware build (board envs land as the stack reaches them)
 ```
 
 ## License

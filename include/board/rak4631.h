@@ -4,7 +4,7 @@
 //  ------------------------------------------------------------------
 //  RAK4631 / WisBlock Core — Nordic nRF52840 + Semtech SX1262.
 //  Integrated TCXO, integrated RF switch driven by DIO2 (no external
-//  LNA enable line — simpler than the Faketec/E22 topology).
+//  LNA enable line — simpler than the ProMicroDIY/E22 topology).
 //
 //  Pin values below are mined from:
 //    * Meshtastic firmware variant: variants/nrf52840/rak4631/variant.h
@@ -73,7 +73,7 @@
 
 // RAK4631 does NOT expose an external LNA enable line — DIO2 handles
 // both TX and RX switching on the integrated RF front-end. This is
-// the simpler case compared to Faketec/E22 where PIN_LORA_RXEN is a
+// the simpler case compared to ProMicroDIY/E22 where PIN_LORA_RXEN is a
 // real GPIO and must be fed to setRfSwitchPins(). -1 signals "not
 // present" to the Radio.cpp init code.
 #define PIN_LORA_RXEN           -1
@@ -100,7 +100,7 @@
 // US ISM band with conservative TX power — the webflasher's CONFIG
 // SET / COMMIT flow lets the user raise this after they've confirmed
 // the regulatory region. Matches the bench defaults we use for the
-// Faketec except for the TX power cap, which is lower here because
+// ProMicroDIY except for the TX power cap, which is lower here because
 // the RAK4631 has no external PA and the SX1262 core is the final
 // amplifier. batt_mult is a first guess for the 1:3 divider — user
 // runs CALIBRATE BATTERY <measured_mv> on first boot.

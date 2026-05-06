@@ -34,8 +34,8 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: pio test -e native_san -v
 
-  faketec-build:
-    name: Firmware build — Faketec (nRF52840 + SX1262)
+  promicrodiy-build:
+    name: Firmware build — ProMicroDIY (nRF52840 + SX1262)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,10 +56,10 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      - name: Build Faketec firmware
+      - name: Build ProMicroDIY firmware
         # Validates that the spec layer (src/rns/*) compiles cleanly
         # under arduino-nrf52 with exceptions+rtti enabled, and that
         # main.cpp + Radio.cpp + LoRaInterface link into a firmware
         # binary. No hardware involvement; just verifies the build
         # graph is intact for the bring-up target.
-        run: pio run -e Faketec
+        run: pio run -e ProMicroDIY

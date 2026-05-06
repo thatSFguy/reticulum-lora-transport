@@ -60,7 +60,7 @@ static void isr_packet_received() {
 
 bool init_hardware() {
     // 1. Gate the external 3V3 rail on boards that require it.
-    //    Without this on Faketec (VEXT_EN = P0.13) the SX1262 is
+    //    Without this on ProMicroDIY (VEXT_EN = P0.13) the SX1262 is
     //    physically unpowered when we try to talk to it.
     #if HAS_VEXT_RAIL && defined(PIN_VEXT_EN) && PIN_VEXT_EN >= 0
         pinMode(PIN_VEXT_EN, OUTPUT);
@@ -69,7 +69,7 @@ bool init_hardware() {
     #endif
 
     // 2. Override the Arduino SPI default pins if the board's
-    //    PlatformIO variant doesn't match our wiring (e.g. Faketec
+    //    PlatformIO variant doesn't match our wiring (e.g. ProMicroDIY
     //    piggy-backs on pca10056 whose default MOSI=45 collides
     //    with our CS). Must happen BEFORE SPI.begin().
     #if defined(RADIO_SPI_OVERRIDE_PINS) && RADIO_SPI_OVERRIDE_PINS

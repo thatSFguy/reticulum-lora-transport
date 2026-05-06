@@ -1,7 +1,7 @@
 #pragma once
 // src/Battery.h — battery voltage read via the nRF52's ADC.
 //
-// All five supported boards (Faketec / RAK4631 / XIAO_nRF52840 /
+// All five supported boards (ProMicroDIY / RAK4631 / XIAO_nRF52840 /
 // Heltec_T114 / RAK3401) expose a battery sense pin via PIN_BATTERY
 // and a divider scaling factor via DEFAULT_CONFIG_BATT_MULT in their
 // header. Board-conditional: boards with `HAS_BATTERY_SENSE == 0`

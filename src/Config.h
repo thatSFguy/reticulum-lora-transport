@@ -27,7 +27,7 @@ struct Config {
     // +22 dBm at the SX1262 core. SF10 trades throughput for range
     // (~1.95 kbps effective, vs ~10.9 kbps at SF7); tune via the
     // webapp once SerialConsole / BLE lands. +22 dBm is the chip's
-    // ceiling; modules with an external PA (e.g. Faketec's E22) push
+    // ceiling; modules with an external PA (e.g. ProMicroDIY's E22) push
     // radiated power to ~30 dBm.
     uint32_t freq_hz           = 904375000u;  // 904.375 MHz (US ISM)
     uint32_t bw_hz             = 250000u;     // 250 kHz
