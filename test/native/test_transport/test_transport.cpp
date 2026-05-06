@@ -1508,6 +1508,106 @@ void test_schedule_announce_calls_provider_each_emit() {
     TEST_ASSERT_EQUAL_STRING("bb", e2.data().slice(148).to_hex().c_str());
 }
 
+// Helpers for §4.5 step 6.3 tests — need to feed a sequence of
+// announces for the same dest with controlled hops + timestamp.
+namespace {
+constexpr const char* ALICE_PRIV_HEX_FRESHNESS =
+    "587e730a70d24e971efa8c146e554996d70bff45b2033d336e2c078dc63d3645"
+    "bef79d95bf6b253827a2e7e81a13ab0b10a908fd158581d1827095b788169e93";
+
+rns::Identity alice_freshness_identity() {
+    return Identity::from_private_bytes(Bytes::from_hex(ALICE_PRIV_HEX_FRESHNESS));
+}
+
+// Build alice's announce for a controlled timestamp + hops byte. The
+// signature is over the body (which excludes hops), so mutating
+// wire[1] keeps validation passing.
+Bytes build_alice_announce(const Bytes& random_prefix,
+                           uint64_t timestamp_secs,
+                           uint8_t wire_hops) {
+    rns::Destination dest(alice_freshness_identity(),
+                          "vectors.alice_announce_no_ratchet");
+    Bytes wire = dest.build_announce(random_prefix, timestamp_secs);
+    if (wire.size() >= 2) wire[1] = wire_hops;
+    return wire;
+}
+} // namespace
+
+// §4.5 step 6.3 — same destination, NEW announce has equal-or-fewer
+// hops than the cached entry: ALWAYS replace.
+void test_path_replacement_equal_or_fewer_hops_always_replaces() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    // First: hops byte = 0 → post-bump path.hops = 1.
+    t.inbound(&iface,
+              build_alice_announce(Bytes::from_hex("0101010101"), 1700000000ULL, 0),
+              1000);
+    TEST_ASSERT_EQUAL_UINT8(1, t.path_table().get(alice_dest)->hops);
+
+    // Second: same hops (= equal), DIFFERENT random_prefix so the
+    // wire body differs and we pass §13.4 dedup. Should replace.
+    t.inbound(&iface,
+              build_alice_announce(Bytes::from_hex("0202020202"), 1700000050ULL, 0),
+              1100);
+    TEST_ASSERT_EQUAL_UINT8(1, t.path_table().get(alice_dest)->hops);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_replacement_rejected);
+}
+
+// §4.5 step 6.3 — new announce has MORE hops + NEWER timestamp:
+// replaces (newer_than_all_cached is true).
+void test_path_replacement_more_hops_newer_timestamp_replaces() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    t.inbound(&iface,
+              build_alice_announce(Bytes::from_hex("0101010101"), 1700000000ULL, 0),
+              1000);
+    TEST_ASSERT_EQUAL_UINT8(1, t.path_table().get(alice_dest)->hops);
+
+    // Second: hops byte = 1 → would-be path.hops=2 (more than 1).
+    // ts = 1700000100 > 1700000000 (newer). Replace.
+    t.inbound(&iface,
+              build_alice_announce(Bytes::from_hex("0202020202"), 1700000100ULL, 1),
+              1100);
+    TEST_ASSERT_EQUAL_UINT8(2, t.path_table().get(alice_dest)->hops);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_replacement_rejected);
+}
+
+// §4.5 step 6.3 — new announce has MORE hops + OLDER timestamp:
+// keep existing entry (the protective rule). The blob still gets
+// recorded for §12.3.2 replay defense.
+void test_path_replacement_more_hops_older_timestamp_kept() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    t.inbound(&iface,
+              build_alice_announce(Bytes::from_hex("0101010101"), 1700000000ULL, 0),
+              1000);
+    TEST_ASSERT_EQUAL_UINT8(1, t.path_table().get(alice_dest)->hops);
+    const size_t blobs_before = t.path_table().get(alice_dest)->random_blobs.size();
+    TEST_ASSERT_EQUAL_UINT(1, blobs_before);
+
+    // Second: more hops (2), OLDER timestamp (1699999900 < 1700000000).
+    // Keep existing entry.
+    t.inbound(&iface,
+              build_alice_announce(Bytes::from_hex("0202020202"), 1699999900ULL, 1),
+              1100);
+
+    const auto* path = t.path_table().get(alice_dest);
+    TEST_ASSERT_EQUAL_UINT8(1, path->hops);  // unchanged
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_replacement_rejected);
+    // Blob still recorded — replay defense doesn't depend on whether
+    // the path entry was replaced.
+    TEST_ASSERT_EQUAL_UINT(2, path->random_blobs.size());
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -1574,6 +1674,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_emit_announce_for_local_unknown_dest);
     RUN_TEST(test_schedule_announce_fires_at_period_boundaries);
     RUN_TEST(test_schedule_announce_calls_provider_each_emit);
+    RUN_TEST(test_path_replacement_equal_or_fewer_hops_always_replaces);
+    RUN_TEST(test_path_replacement_more_hops_newer_timestamp_replaces);
+    RUN_TEST(test_path_replacement_more_hops_older_timestamp_kept);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

@@ -580,44 +580,79 @@ void Transport::handle_link_data_forward(Interface* received_on,
     }
 }
 
+// §4.1 — random_hash[5:10] is a 5-byte big-endian uint40 unix-seconds
+// timestamp. Parses for the §4.5 step 6.3 freshness comparison.
+static uint64_t parse_random_blob_timestamp(const Bytes& blob) {
+    if (blob.size() < 10) return 0;
+    uint64_t ts = 0;
+    for (int i = 5; i < 10; ++i) ts = (ts << 8) | blob[i];
+    return ts;
+}
+
 bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
                                          Interface* received_on,
                                          const Packet& packet,
                                          uint64_t now_ms) {
-    // §4.5 step 6.1 — known_destinations[dest_hash] = public_key (we
-    // store just the pub for now; ratchet caching lands with §7.4).
+    // §4.5 step 6.1 — known_destinations[dest_hash] = public_key
+    // unconditionally (identity correctness, independent of routing).
     _known_destinations[key_of(va.destination_hash)] = va.public_key;
 
-    // §4.5 step 6.3 — path_table update. We don't yet apply the full
-    // hop-comparison freshness rules (those need timestamp parsing
-    // from random_hash[5:10] per §4.1, and they cross-reference the
-    // existing path entry's hop count). For this first slice we
-    // unconditionally write the latest announce's data — but preserve
-    // the existing random_blobs window across replacement so §12.3.2
-    // replay defence works across multiple announces from the same
-    // destination.
-    PathEntry e;
-    e.timestamp_ms        = now_ms;
-    e.hops                = packet.hops();
-    e.expires_ms          = now_ms + 60ULL * 60ULL * 1000ULL;  // §12.4.1 AP_PATH_TIME default
-    // For HEADER_2 announces the wire's transport_id is the relay
-    // that forwarded the announce to us — that's our next hop on
-    // the way back to the destination. For HEADER_1 announces the
-    // dest is 1 hop away on `received_on`; no transport_id is
-    // needed for forwarding (we'd strip it via §12.2.2 anyway).
-    e.next_hop            = (packet.header_type() == Packet::HeaderType::HEADER_2)
-                          ? packet.transport_id()
-                          : Bytes();
-    e.receiving_interface = received_on;
-    e.announce_wire       = packet.wire_bytes();
-    if (const PathEntry* existing = _paths.get(va.destination_hash)) {
-        e.random_blobs = existing->random_blobs;
+    // §4.5 step 6.3 — path-table replacement rules. We REPLACE iff:
+    //   - no existing entry (first sighting), OR
+    //   - new hops <= existing hops (better-or-equal path), OR
+    //   - existing has expired, OR
+    //   - new emission timestamp > every cached blob's timestamp
+    //     (newer announce from the same destination via a longer
+    //     path — accept but only if strictly fresher).
+    // Otherwise: KEEP the existing entry. The §12.3.2 random_blob
+    // replay record still happens regardless (caller still needs
+    // blob_is_new for rebroadcast decisions).
+    const PathEntry* existing = _paths.get(va.destination_hash);
+    bool replace = !existing;
+    if (existing) {
+        const uint8_t new_hops = packet.hops();
+        if (new_hops <= existing->hops) {
+            replace = true;
+        } else if (existing->expires_ms <= now_ms) {
+            replace = true;
+        } else {
+            const uint64_t new_ts = parse_random_blob_timestamp(va.random_hash);
+            bool newer_than_all = true;
+            for (const Bytes& blob : existing->random_blobs) {
+                if (new_ts <= parse_random_blob_timestamp(blob)) {
+                    newer_than_all = false;
+                    break;
+                }
+            }
+            replace = newer_than_all;
+        }
     }
-    _paths.put(va.destination_hash, std::move(e));
+
+    if (replace) {
+        PathEntry e;
+        e.timestamp_ms        = now_ms;
+        e.hops                = packet.hops();
+        e.expires_ms          = now_ms + 60ULL * 60ULL * 1000ULL;  // §12.4.1 AP_PATH_TIME default
+        // For HEADER_2 announces the wire's transport_id is the relay
+        // that forwarded the announce to us — that's our next hop on
+        // the way back to the destination. For HEADER_1 announces the
+        // dest is 1 hop away on `received_on`; no transport_id is
+        // needed for forwarding (we'd strip it via §12.2.2 anyway).
+        e.next_hop            = (packet.header_type() == Packet::HeaderType::HEADER_2)
+                              ? packet.transport_id()
+                              : Bytes();
+        e.receiving_interface = received_on;
+        e.announce_wire       = packet.wire_bytes();
+        if (existing) e.random_blobs = existing->random_blobs;  // preserve window
+        _paths.put(va.destination_hash, std::move(e));
+    } else {
+        _stats.path_replacement_rejected++;
+    }
 
     // §12.3.2 random_blob replay defence — record the blob for this
-    // dest. note_random_blob returns true if the blob is new (caller
-    // should rebroadcast), false on replay.
+    // dest regardless of whether the path entry was replaced.
+    // note_random_blob returns true if the blob is new (caller should
+    // rebroadcast), false on replay.
     return _paths.note_random_blob(va.destination_hash, va.random_hash);
 }
 

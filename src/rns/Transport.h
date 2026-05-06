@@ -207,6 +207,7 @@ public:
         uint64_t path_requests_local_answered = 0; // §7.2 branch 1 — local dest match
         uint64_t path_requests_local_no_seed  = 0; // §7.2 branch 1 dropped (no seed fn)
         uint64_t scheduled_announces_emitted  = 0; // schedule_announce-driven emits
+        uint64_t path_replacement_rejected    = 0; // §4.5 step 6.3 — kept stale-but-fresher cached entry
     };
     const Stats& stats() const { return _stats; }
 
