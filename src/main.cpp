@@ -16,9 +16,11 @@
 #include "Storage.h"
 
 #include "rns/Bytes.h"
+#include "rns/Destination.h"
 #include "rns/Identity.h"
 #include "rns/Interface.h"
 #include "rns/LoRaInterface.h"
+#include "rns/Telemetry.h"
 #include "rns/Transport.h"
 
 namespace {
@@ -30,6 +32,13 @@ constexpr const char* IDENTITY_FILE = "/identity.bin";
 // pacing hint, not a hard schedule, so being off by 2x is fine.
 // Recompute when Config gets used to derive runtime SF/BW/CR.
 constexpr uint32_t LORA_EFFECTIVE_BPS_DEFAULT = 10937u;
+
+// Per memory transport_node_telemetry_beacon (cadence option b):
+// lightweight 5-min "alive" announce keeps paths fresh per §7.5,
+// 2h "full" beacon carries the metrics payload along the warm path.
+constexpr uint64_t TELEMETRY_ALIVE_PERIOD_MS  = 5ULL * 60ULL * 1000ULL;
+constexpr uint64_t TELEMETRY_BEACON_PERIOD_MS = 2ULL * 60ULL * 60ULL * 1000ULL;
+constexpr const char* TELEMETRY_DEST_NAME = "transport.telemetry";
 
 rns::Transport*     g_transport  = nullptr;
 rns::LoRaInterface* g_lora_iface = nullptr;
@@ -46,6 +55,57 @@ rlr::Config         g_cfg;        // hardcoded defaults from Config.h
 // Per memory `flash_wear_minimize_writes`: the priv only gets
 // written ONCE per device lifetime (first-boot generation). All
 // subsequent boots load from flash with no write.
+// Source of (random_prefix, unix_seconds) for outbound announce
+// construction. random_prefix comes from the SX1262's RNG (5 bytes).
+// unix_seconds is millis()/1000 — seconds-since-boot, NOT real wall
+// clock. Per §9.6 / memory transport_node_telemetry_beacon, peers
+// tolerate clockless senders by treating implausible timestamps as
+// "no clock" and substituting receive time. Real wall-clock time
+// would require an RTC or a network sync; out of scope for this
+// firmware.
+rns::AnnounceSeed announce_seed_fn() {
+    rns::Bytes prefix(5);
+    for (size_t i = 0; i < 5; ++i) prefix[i] = rlr::radio::random_byte();
+    return rns::AnnounceSeed{ std::move(prefix), millis() / 1000ULL };
+}
+
+// Build the §telemetry-beacon payload per memory
+// transport_node_telemetry_beacon's frozen schema. Field stability
+// is the contract; Stats counters can evolve internally without
+// breaking the wire format.
+rns::telemetry::Snapshot make_telemetry_snapshot() {
+    rns::telemetry::Snapshot s;
+
+    // lat/lon are manually configured via the webapp (per memory).
+    // Both fields stored as microdegrees in Config; 0/0 = unset.
+    if (g_cfg.latitude_udeg != 0 || g_cfg.longitude_udeg != 0) {
+        s.have_position = true;
+        s.lat = static_cast<float>(g_cfg.latitude_udeg) / 1000000.0f;
+        s.lon = static_cast<float>(g_cfg.longitude_udeg) / 1000000.0f;
+    }
+
+    // Battery read: TBD when board-specific ADC driver lands. Faketec
+    // exposes BATT_PIN through its header; the multiplier in
+    // g_cfg.batt_mult will scale ADC raw → mV. Placeholder 0 for now.
+    s.battery_mv = 0;
+
+    if (g_transport) {
+        s.route_count = static_cast<uint16_t>(
+            g_transport->path_table().size());
+        // Sum of forward-path emissions — what a network-health
+        // dashboard would chart as "this node's relay throughput".
+        // Schema-frozen: keep this exact set even if Stats grows.
+        const auto& st = g_transport->stats();
+        s.packets_forwarded = static_cast<uint32_t>(
+            st.announces_rebroadcast +
+            st.data_forwarded_header_1 +
+            st.data_forwarded_header_2 +
+            st.proof_forwarded +
+            st.link_data_forwarded);
+    }
+    return s;
+}
+
 rns::Identity load_or_generate_identity() {
     uint8_t priv[64];
     int n = rlr::storage::load_file(IDENTITY_FILE, priv, sizeof(priv));
@@ -109,7 +169,29 @@ void setup() {
         });
     g_transport->register_interface(g_lora_iface);
 
-    Serial.println(F("rlr: setup complete — Transport + LoRa interface ready"));
+    // Telemetry destination + scheduled announces (per memory
+    // transport_node_telemetry_beacon). Same Identity as the
+    // transport node itself — the dest_hash is stable across boots
+    // because Identity persists.
+    g_transport->set_announce_seed_fn(announce_seed_fn);
+    rns::Destination tel_dest(g_transport->local_identity(),
+                              TELEMETRY_DEST_NAME);
+    rns::Bytes tel_hash = tel_dest.destination_hash();
+    g_transport->register_local_destination(std::move(tel_dest));
+    // 5-min lightweight "alive" — empty app_data, just refreshes
+    // path table entries on relays in earshot.
+    g_transport->schedule_announce(tel_hash,
+                                   TELEMETRY_ALIVE_PERIOD_MS,
+                                   /*fn=*/nullptr);
+    // 2-hour full beacon — encodes the Snapshot at emit time.
+    g_transport->schedule_announce(tel_hash,
+                                   TELEMETRY_BEACON_PERIOD_MS,
+                                   []() {
+                                       return rns::telemetry::encode(
+                                           make_telemetry_snapshot());
+                                   });
+
+    Serial.println(F("rlr: setup complete — Transport + LoRa + telemetry ready"));
 }
 
 void loop() {
