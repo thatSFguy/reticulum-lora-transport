@@ -33,8 +33,10 @@ bool  ed25519_verify(const Bytes& pub, const Bytes& sig,
                      const uint8_t* msg, size_t msg_len);
 
 // X25519 / Curve25519 — SPEC §1.1 ECDH key. The 32-byte private input
-// is the clamped X25519 scalar (Reticulum stores it pre-clamped on disk
-// per §1.3, so callers pass it through unmodified).
+// is the raw X25519 scalar as stored on disk per §1.3. RNS does NOT
+// guarantee on-disk privs are pre-clamped (Python's X25519 accepts
+// un-clamped bytes and clamps during scalar mult per RFC 7748 §5);
+// these functions clamp internally before calling out to Curve25519.
 Bytes x25519_public_from_private(const Bytes& priv);
 Bytes x25519_shared_secret(const Bytes& priv, const Bytes& peer_pub);
 

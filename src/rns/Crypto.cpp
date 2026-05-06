@@ -49,15 +49,24 @@ static constexpr uint8_t X25519_BASEPOINT[32] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
+// RFC 7748 §5 X25519 scalar clamping. rweather's Curve25519::eval takes
+// `const uint8_t s[32]` and does NOT clamp internally — clamping is the
+// caller's responsibility. RNS test vectors include un-clamped on-disk
+// privs (e.g. `bob` in identities.json:vectors/1) because Python's
+// X25519PrivateKey.from_private_bytes accepts arbitrary 32-byte input
+// and clamps during scalar mult per RFC 7748. We do the same here.
+static void x25519_clamp(uint8_t scalar[32]) {
+    scalar[0]  &= 0xF8;
+    scalar[31] = (scalar[31] & 0x7F) | 0x40;
+}
+
 Bytes x25519_public_from_private(const Bytes& priv) {
     if (priv.size() != 32) {
         throw std::invalid_argument("x25519_public_from_private: priv must be 32 bytes");
     }
-    // Curve25519::eval modifies the 's' (scalar) input via clamping. RNS stores
-    // the clamped key on disk (§1.3) so re-clamping is a no-op, but we copy
-    // into a scratch buffer to keep the input Bytes immutable.
     uint8_t scalar[32];
     std::memcpy(scalar, priv.data(), 32);
+    x25519_clamp(scalar);
     Bytes pub(32);
     if (!Curve25519::eval(pub.data(), scalar, X25519_BASEPOINT)) {
         // eval returns false only on weak-point inputs; basepoint isn't weak,
@@ -73,6 +82,7 @@ Bytes x25519_shared_secret(const Bytes& priv, const Bytes& peer_pub) {
     }
     uint8_t scalar[32];
     std::memcpy(scalar, priv.data(), 32);
+    x25519_clamp(scalar);
     Bytes ss(32);
     if (!Curve25519::eval(ss.data(), scalar, peer_pub.data())) {
         throw std::runtime_error("x25519_shared_secret: peer_pub is a weak point");
