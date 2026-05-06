@@ -195,6 +195,25 @@ void setup() {
     // transport node itself — the dest_hash is stable across boots
     // because Identity persists.
     g_transport->set_announce_seed_fn(announce_seed_fn);
+
+    // Surface every path-table insert/update on Serial so the operator
+    // can watch the routing table grow as announces arrive. The first
+    // 8 hex chars of the destination_hash are enough to disambiguate
+    // in a small mesh; full hash printed on first sighting only.
+    g_transport->set_path_observer([](const rns::PathUpdate& u) {
+        Serial.print("rlr: path ");
+        Serial.print(u.is_new ? "NEW " : "UPD ");
+        Serial.print(u.destination_hash.to_hex().c_str());
+        Serial.print("  hops=");
+        Serial.print(u.hops);
+        if (!u.next_hop.empty()) {
+            Serial.print("  via=");
+            Serial.print(u.next_hop.to_hex().substr(0, 8).c_str());
+        } else {
+            Serial.print("  (direct)");
+        }
+        Serial.println();
+    });
     rns::Destination tel_dest(g_transport->local_identity(),
                               TELEMETRY_DEST_NAME);
     rns::Bytes tel_hash = tel_dest.destination_hash();

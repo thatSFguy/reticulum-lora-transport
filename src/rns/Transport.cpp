@@ -741,7 +741,19 @@ bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
         e.receiving_interface = received_on;
         e.announce_wire       = packet.wire_bytes();
         if (existing) e.random_blobs = existing->random_blobs;  // preserve window
+        const bool was_new = (existing == nullptr);
         _paths.put(va.destination_hash, std::move(e));
+
+        if (_path_observer) {
+            PathUpdate u;
+            u.destination_hash = va.destination_hash;
+            u.hops             = packet.hops();
+            u.next_hop         = (packet.header_type() == Packet::HeaderType::HEADER_2)
+                               ? packet.transport_id()
+                               : Bytes();
+            u.is_new           = was_new;
+            _path_observer(u);
+        }
     } else {
         _stats.path_replacement_rejected++;
     }

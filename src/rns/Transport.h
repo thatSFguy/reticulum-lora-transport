@@ -22,6 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "rns/Bytes.h"
@@ -53,6 +54,18 @@ using AnnounceHandler =
 // with a stat counter rather than crashing.
 struct AnnounceSeed { Bytes random_prefix; uint64_t unix_seconds; };
 using AnnounceSeedFn = std::function<AnnounceSeed()>;
+
+// Fired after a path-table entry is inserted or replaced (§4.5 step
+// 6.3). Lets firmware glue surface a "route tracked" log without
+// pulling Arduino headers into src/rns/. Not fired on rejected
+// replacements (those bump the path_replacement_rejected stat).
+struct PathUpdate {
+    Bytes   destination_hash;
+    uint8_t hops          = 0;
+    Bytes   next_hop;        // empty when the dest is 1 hop away (HEADER_1 announce)
+    bool    is_new         = false;  // true = first sighting, false = path replaced
+};
+using PathObserverFn = std::function<void(const PathUpdate&)>;
 
 class Transport {
 public:
@@ -121,6 +134,11 @@ public:
     // outbound announces. Without this, branch 1 of §7.2 silently
     // drops requests for our own destinations.
     void set_announce_seed_fn(AnnounceSeedFn fn);
+
+    // Optional observer fired on every accepted path-table mutation
+    // (§4.5 step 6.3). Firmware uses this to print a "route tracked"
+    // log line. Setting nullptr (default) disables the hook.
+    void set_path_observer(PathObserverFn fn) { _path_observer = std::move(fn); }
 
     // Build and emit an announce for a registered local destination.
     // Returns true if emitted, false if the dest_hash isn't local or
@@ -248,6 +266,7 @@ private:
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
     AnnounceSeedFn _announce_seed_fn;
+    PathObserverFn _path_observer;
 
     struct ScheduledAnnounce {
         Bytes           dest_hash;
