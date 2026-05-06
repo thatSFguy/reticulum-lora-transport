@@ -7,7 +7,7 @@ on:
 
 jobs:
   native-tests:
-    name: Native unit tests
+    name: Native unit tests (ASAN+UBSAN)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,5 +28,8 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      - name: Run native tests
-        run: pio test -e native -v
+      - name: Run native tests under ASAN+UBSAN
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: pio test -e native_san -v

@@ -15,6 +15,7 @@
 //   §1.3 — On-disk private key blob layout (X25519 || Ed25519)
 
 #include <unity.h>
+#include <stdexcept>
 #include "rns/Bytes.h"
 #include "rns/Identity.h"
 
@@ -113,10 +114,30 @@ void test_bytes_hex_roundtrip() {
     TEST_ASSERT_EQUAL_STRING(h, b.to_hex().c_str());
 }
 
+void test_bytes_from_hex_rejects_odd_length() {
+    try {
+        (void)Bytes::from_hex("abc");
+        TEST_FAIL_MESSAGE("expected from_hex(\"abc\") to throw on odd length");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+}
+
+void test_bytes_from_hex_rejects_non_hex_char() {
+    try {
+        (void)Bytes::from_hex("ZZ");
+        TEST_FAIL_MESSAGE("expected from_hex(\"ZZ\") to throw on non-hex char");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     UNITY_BEGIN();
     RUN_TEST(test_bytes_hex_roundtrip);
+    RUN_TEST(test_bytes_from_hex_rejects_odd_length);
+    RUN_TEST(test_bytes_from_hex_rejects_non_hex_char);
     RUN_TEST(test_canonical_name_hashes);
     RUN_TEST(test_identity_alice);
     RUN_TEST(test_identity_bob);
