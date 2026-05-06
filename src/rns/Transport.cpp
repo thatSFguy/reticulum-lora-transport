@@ -10,7 +10,9 @@
 
 namespace rns {
 
-Transport::Transport(Identity local_identity) : _local(std::move(local_identity)) {}
+Transport::Transport(Identity local_identity, bool transport_enabled)
+    : _local(std::move(local_identity)),
+      _transport_enabled(transport_enabled) {}
 
 void Transport::register_interface(Interface* iface) {
     _interfaces.push_back(iface);
@@ -43,9 +45,33 @@ Bytes Transport::dedup_hash(const Packet& p) {
 }
 
 void Transport::tick(uint64_t now_ms) {
+    drive_announce_rebroadcast(now_ms);
     for (Interface* i : _interfaces) i->tick(now_ms);
     _paths.evict_expired(now_ms);
     _hashlist.purge_if_over_cap();
+}
+
+void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
+    auto due = _announce_table.pop_due(now_ms);
+    for (auto& entry : due) {
+        // §2.4 — relay increments the hops byte. Clone the cached wire
+        // bytes (we may emit on multiple interfaces — each gets its
+        // own buffer because Interface::queue_announce takes by value).
+        Bytes wire = entry.announce_wire;
+        if (wire.size() >= 2) {
+            // Saturate at 255 rather than wrapping. Real meshes never
+            // come anywhere near this, but UB on overflow is its own
+            // problem.
+            if (wire[1] < 255) wire[1] = wire[1] + 1;
+        }
+        const uint8_t fwd_hops = (entry.announce_hops < 255)
+                               ? entry.announce_hops + 1 : 255;
+        for (Interface* iface : _interfaces) {
+            if (iface == entry.received_from) continue;  // don't echo back
+            iface->queue_announce(wire, fwd_hops);
+        }
+        _stats.announces_rebroadcast++;
+    }
 }
 
 void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_ms) {
@@ -111,7 +137,25 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
 
     _stats.announce_validated++;
 
-    cache_validated_announce(va, received_on, packet.wire_bytes(), now_ms);
+    const bool blob_is_new =
+        cache_validated_announce(va, received_on, packet, now_ms);
+
+    // §12.3 — relay-side rebroadcast. Skip if we're a leaf, if this is
+    // a path-response (§12.3.3), or if the blob was already cached
+    // (§12.3.2 random_blob replay defence).
+    if (_transport_enabled
+        && packet.context() != Packet::CONTEXT_PATH_RESPONSE
+        && blob_is_new) {
+        AnnounceEntry entry;
+        entry.dest_hash        = va.destination_hash;
+        entry.inserted_ms      = now_ms;
+        entry.retransmit_at_ms = now_ms;  // immediate eligibility; tick drains
+        entry.received_from    = received_on;
+        entry.announce_hops    = packet.hops();
+        entry.announce_wire    = packet.wire_bytes();
+        _announce_table.put(std::move(entry));
+        _stats.announces_queued++;
+    }
 
     for (const auto& cb : _announce_handlers) {
         cb(va, received_on);
@@ -119,9 +163,9 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
     }
 }
 
-void Transport::cache_validated_announce(const ValidatedAnnounce& va,
+bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
                                          Interface* received_on,
-                                         const Bytes& wire,
+                                         const Packet& packet,
                                          uint64_t now_ms) {
     // §4.5 step 6.1 — known_destinations[dest_hash] = public_key (we
     // store just the pub for now; ratchet caching lands with §7.4).
@@ -131,20 +175,26 @@ void Transport::cache_validated_announce(const ValidatedAnnounce& va,
     // hop-comparison freshness rules (those need timestamp parsing
     // from random_hash[5:10] per §4.1, and they cross-reference the
     // existing path entry's hop count). For this first slice we
-    // unconditionally write the latest announce's data. The rules
-    // land alongside ANNOUNCE rebroadcast (§12.3).
+    // unconditionally write the latest announce's data — but preserve
+    // the existing random_blobs window across replacement so §12.3.2
+    // replay defence works across multiple announces from the same
+    // destination.
     PathEntry e;
     e.timestamp_ms        = now_ms;
-    e.hops                = 0;  // first-hop reception — refined when forwarding lands
+    e.hops                = packet.hops();
     e.expires_ms          = now_ms + 60ULL * 60ULL * 1000ULL;  // §12.4.1 AP_PATH_TIME default
     e.next_hop            = Bytes(16);  // unknown until DATA forwarding learns it
     e.receiving_interface = received_on;
-    e.announce_wire       = wire;
+    e.announce_wire       = packet.wire_bytes();
+    if (const PathEntry* existing = _paths.get(va.destination_hash)) {
+        e.random_blobs = existing->random_blobs;
+    }
     _paths.put(va.destination_hash, std::move(e));
 
     // §12.3.2 random_blob replay defence — record the blob for this
-    // dest. note_random_blob caps the sliding window automatically.
-    _paths.note_random_blob(va.destination_hash, va.random_hash);
+    // dest. note_random_blob returns true if the blob is new (caller
+    // should rebroadcast), false on replay.
+    return _paths.note_random_blob(va.destination_hash, va.random_hash);
 }
 
 } // namespace rns

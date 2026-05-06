@@ -38,18 +38,21 @@ void tearDown() {}
 
 namespace {
 
-// Stub Interface — never actually transmits anything. Used so
-// Transport.register_interface() has something to register.
+// Stub Interface — captures emissions for rebroadcast tests. Wide
+// announce-cap so tick() drains everything queued without throttling.
 class StubInterface : public Interface {
 public:
     StubInterface() : Interface(make_cfg()) {}
+    std::vector<Bytes> emitted;
 protected:
-    void on_transmit(const Bytes&) override {}
+    void on_transmit(const Bytes& wire) override { emitted.push_back(wire); }
 private:
     static Config make_cfg() {
         Config c;
-        c.bitrate_bps = 8000;
-        c.airtime_window_ms = 1000;
+        c.bitrate_bps         = 1'000'000;  // 1 Mbps — nothing throttles in tests
+        c.announce_cap_pct    = 100.0f;
+        c.airtime_window_ms   = 1000;
+        c.max_queued_announces = 32;
         return c;
     }
 };
@@ -217,6 +220,118 @@ void test_tick_evicts_expired_paths() {
     TEST_ASSERT_EQUAL_UINT(0, t.path_table().size());
 }
 
+// §12.3 — leaf node (transport_enabled = false) does NOT queue
+// announces for rebroadcast.
+void test_leaf_does_not_rebroadcast() {
+    Transport t(bob_identity(), /*transport_enabled=*/false);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    t.inbound(&in_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announce_validated);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().announces_queued);
+    TEST_ASSERT_TRUE(t.announce_table().empty());
+
+    t.tick(2000);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().announces_rebroadcast);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+}
+
+// §12.3 — relay rebroadcasts on every interface except `received_from`,
+// with the hops byte incremented per §2.4.
+void test_relay_rebroadcasts_on_other_interfaces() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    Bytes wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    const uint8_t orig_hops = wire[1];
+    t.inbound(&in_iface, wire, /*now=*/1000);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_queued);
+    TEST_ASSERT_EQUAL_UINT(1, t.announce_table().size());
+
+    // tick at retransmit_at_ms (= now_ms = 1000) — entry is due.
+    t.tick(1000);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_rebroadcast);
+    TEST_ASSERT_TRUE(t.announce_table().empty());  // single-shot
+
+    // Rebroadcast went to out_iface only (received_from filter).
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+
+    // §2.4 — hops byte incremented on the wire we just emitted.
+    TEST_ASSERT_EQUAL_UINT8(orig_hops + 1, out_iface.emitted[0][1]);
+    // Body untouched: everything from offset 19 onwards is identical.
+    TEST_ASSERT_EQUAL_UINT(wire.size(), out_iface.emitted[0].size());
+    for (size_t i = 19; i < wire.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT8(wire[i], out_iface.emitted[0][i]);
+    }
+}
+
+// §12.3.3 — PATH_RESPONSE announces don't rebroadcast.
+void test_path_response_announce_does_not_rebroadcast() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    // Synthesize a PATH_RESPONSE announce by mutating the cached
+    // wire's context byte to 0x0B. The signature was computed over
+    // the body and outer dest_hash only (§4.2) — context isn't in
+    // signed_data, so this stays valid.
+    Bytes wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    wire[18] = Packet::CONTEXT_PATH_RESPONSE;  // context byte at offset 18 in HEADER_1
+
+    t.inbound(&iface, wire, 1000);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announce_validated);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().announces_queued);
+    TEST_ASSERT_TRUE(t.announce_table().empty());
+
+    t.tick(2000);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().announces_rebroadcast);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// §12.3.2 — the random_blob replay defence prevents queueing the same
+// announce twice. A direct identical-wire replay is caught earlier by
+// §13.4 dedup, so we exercise the random_blob path by injecting the
+// same body via a wire that survives dedup (mutate context byte ⇒
+// different dedup hash, but signature still valid because context
+// isn't in signed_data).
+void test_relay_does_not_rebroadcast_random_blob_replay() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    t.inbound(&iface, wire, 1000);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_queued);
+
+    // Same announce body, different context byte → different dedup
+    // hash → reaches handle_announce. random_blob check should reject.
+    Bytes wire2 = wire;
+    wire2[18] = 0x05;  // any non-default context that isn't PATH_RESPONSE
+    t.inbound(&iface, wire2, 1001);
+    TEST_ASSERT_EQUAL_UINT(2, t.stats().announce_validated);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_queued);  // unchanged
+}
+
+// Single-interface relay node. Receives an announce on its only
+// interface. Rebroadcast must NOT echo back — emitted stays at 0.
+void test_relay_with_single_interface_does_not_echo() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    t.inbound(&iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    t.tick(1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_rebroadcast);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());  // single-iface, no echo
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     UNITY_BEGIN();
@@ -228,5 +343,10 @@ int main(int argc, char** argv) {
     RUN_TEST(test_inbound_rejects_malformed_packet);
     RUN_TEST(test_tampered_announce_is_rejected);
     RUN_TEST(test_tick_evicts_expired_paths);
+    RUN_TEST(test_leaf_does_not_rebroadcast);
+    RUN_TEST(test_relay_rebroadcasts_on_other_interfaces);
+    RUN_TEST(test_path_response_announce_does_not_rebroadcast);
+    RUN_TEST(test_relay_does_not_rebroadcast_random_blob_replay);
+    RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

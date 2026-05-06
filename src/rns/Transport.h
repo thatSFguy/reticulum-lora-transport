@@ -25,6 +25,7 @@
 
 #include "rns/Bytes.h"
 #include "rns/Identity.h"
+#include "rns/tables/AnnounceTable.h"
 #include "rns/tables/PacketHashList.h"
 #include "rns/tables/PathTable.h"
 
@@ -45,7 +46,12 @@ public:
     // The local node's identity. Required for self-announce filtering
     // (§9.5) and for future outbound paths (encryption, signing path
     // requests). For now we only use identity_hash for self-filter.
-    explicit Transport(Identity local_identity);
+    //
+    // `transport_enabled` (§12.1) gates relay-side ANNOUNCE
+    // rebroadcasting. Leaves run with transport_enabled = false; relay
+    // nodes pass true to populate AnnounceTable on validated announces
+    // and rebroadcast them on each registered interface during tick().
+    explicit Transport(Identity local_identity, bool transport_enabled = false);
 
     Transport(const Transport&) = delete;
     Transport& operator=(const Transport&) = delete;
@@ -70,10 +76,12 @@ public:
     void register_announce_handler(AnnounceHandler cb);
 
     // Introspection — used by tests and status pages.
-    const Identity&       local_identity() const { return _local; }
-    const PathTable&      path_table()     const { return _paths; }
-    const PacketHashList& hashlist()       const { return _hashlist; }
-    size_t                known_count()    const { return _known_destinations.size(); }
+    const Identity&       local_identity()     const { return _local; }
+    bool                  transport_enabled()  const { return _transport_enabled; }
+    const PathTable&      path_table()         const { return _paths; }
+    const PacketHashList& hashlist()           const { return _hashlist; }
+    const AnnounceTable&  announce_table()     const { return _announce_table; }
+    size_t                known_count()        const { return _known_destinations.size(); }
 
     // §4.5 step 6.1 — `Identity.recall(dest_hash)` analogue. Returns
     // the cached 64-byte public_key for the destination, or nullptr
@@ -91,13 +99,17 @@ public:
         uint64_t announce_rejected     = 0;
         uint64_t collisions_rejected   = 0;
         uint64_t announces_delivered   = 0;
+        uint64_t announces_queued      = 0;  // AnnounceTable insertions
+        uint64_t announces_rebroadcast = 0;  // tick()-driven emissions
     };
     const Stats& stats() const { return _stats; }
 
 private:
     Identity        _local;
+    bool            _transport_enabled;
     PathTable       _paths;
     PacketHashList  _hashlist;
+    AnnounceTable   _announce_table;
     std::unordered_map<std::string, Bytes> _known_destinations;  // dest_hash → 64B pub
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
@@ -110,10 +122,18 @@ private:
     // and update the path entry (timestamp / hops / next_hop /
     // receiving_interface / cached announce wire). Caller has
     // already cleared §4.5 step 4 collision check.
-    void cache_validated_announce(const ValidatedAnnounce& va,
+    //
+    // Returns true if the announce's random_blob is new for this
+    // destination (caller may queue rebroadcast per §12.3.2).
+    bool cache_validated_announce(const ValidatedAnnounce& va,
                                   Interface* received_on,
-                                  const Bytes& wire,
+                                  const Packet& packet,
                                   uint64_t now_ms);
+
+    // §12.3 — fire all due AnnounceTable entries on every registered
+    // interface except `received_from`, with hops byte incremented
+    // per §2.4. Called from tick().
+    void drive_announce_rebroadcast(uint64_t now_ms);
 
     static Bytes dedup_hash(const Packet& p);
     static std::string key_of(const Bytes& b);
