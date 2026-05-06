@@ -23,11 +23,17 @@ struct Config {
     uint8_t  _reserved         = 0;
 
     // ---- radio (consumed by src/Radio.cpp) ----
-    uint32_t freq_hz           = 904375000u;  // 904.375 MHz default (US ISM)
+    // Deployment defaults: 904.375 MHz / BW 250 kHz / SF10 / CR 4/5 /
+    // +22 dBm at the SX1262 core. SF10 trades throughput for range
+    // (~1.95 kbps effective, vs ~10.9 kbps at SF7); tune via the
+    // webapp once SerialConsole / BLE lands. +22 dBm is the chip's
+    // ceiling; modules with an external PA (e.g. Faketec's E22) push
+    // radiated power to ~30 dBm.
+    uint32_t freq_hz           = 904375000u;  // 904.375 MHz (US ISM)
     uint32_t bw_hz             = 250000u;     // 250 kHz
-    uint8_t  sf                = 7;           // SF7
+    uint8_t  sf                = 10;          // SF10
     uint8_t  cr                = 5;           // CR 4/5 (denominator)
-    int8_t   txp_dbm           = 14;          // 14 dBm at SX1262 core
+    int8_t   txp_dbm           = 22;          // +22 dBm at SX1262 core
     uint8_t  flags             = 0;           // bit 0 telemetry, bit 1 lxmf, bit 2 heartbeat
 
     // ---- battery ----

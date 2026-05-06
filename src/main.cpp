@@ -30,11 +30,16 @@ namespace {
 
 constexpr const char* IDENTITY_FILE = "/identity.bin";
 
-// LoRa effective bitrate at SF7 / BW250 / CR4/5 ≈ 10937 bps. Used
-// for the §12.3.1 announce-cap budget. Approximate — the cap is a
-// pacing hint, not a hard schedule, so being off by 2x is fine.
-// Recompute when Config gets used to derive runtime SF/BW/CR.
-constexpr uint32_t LORA_EFFECTIVE_BPS_DEFAULT = 10937u;
+// LoRa effective bitrate at the deployment defaults
+// (SF10 / BW250 / CR4/5):
+//   bitrate ≈ (SF * BW * 4) / (2^SF * CR_denom)
+//           = (10 * 250000 * 4) / (1024 * 5)
+//           ≈ 1953 bps
+// Used for the §12.3.1 announce-cap budget. Approximate — the cap
+// is a pacing hint, not a hard schedule, so being off by 2x is fine.
+// Recompute on the fly when Config drives runtime SF/BW/CR (lands
+// when SerialConsole / BLE allow setting them at runtime).
+constexpr uint32_t LORA_EFFECTIVE_BPS_DEFAULT = 1953u;
 
 // Per memory transport_node_telemetry_beacon (cadence option b):
 // lightweight 5-min "alive" announce keeps paths fresh per §7.5,
