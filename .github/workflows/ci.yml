@@ -33,3 +33,33 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: pio test -e native_san -v
+
+  faketec-build:
+    name: Firmware build — Faketec (nRF52840 + SX1262)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO state
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build Faketec firmware
+        # Validates that the spec layer (src/rns/*) compiles cleanly
+        # under arduino-nrf52 with exceptions+rtti enabled, and that
+        # main.cpp + Radio.cpp + LoRaInterface link into a firmware
+        # binary. No hardware involvement; just verifies the build
+        # graph is intact for the bring-up target.
+        run: pio run -e Faketec
