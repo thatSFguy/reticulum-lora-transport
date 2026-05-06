@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -37,6 +38,8 @@ jobs:
   promicrodiy-build:
     name: Firmware build — ProMicroDIY (nRF52840 + SX1262)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # release-on-tag step needs to publish to GitHub Releases
     steps:
       - uses: actions/checkout@v4
 
@@ -63,3 +66,35 @@ jobs:
         # binary. No hardware involvement; just verifies the build
         # graph is intact for the bring-up target.
         run: pio run -e ProMicroDIY
+
+      - name: Convert hex to UF2
+        # Family ID 0xADA52840 = "Adafruit nRF52840" — what the
+        # Adafruit nRF52 bootloader (which ships on Nice!Nano clones,
+        # XIAO nRF52840, RAK4631, Heltec T114, etc.) accepts on the
+        # USB mass-storage drag-and-drop interface. uf2conv.py is
+        # Microsoft's canonical converter; it has a built-in Intel
+        # HEX parser so no extra Python deps are needed.
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o uf2conv.py
+          python uf2conv.py -c -f 0xADA52840 -o firmware-ProMicroDIY.uf2 .pio/build/ProMicroDIY/firmware.hex
+
+      - name: Upload UF2 as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-ProMicroDIY
+          path: firmware-ProMicroDIY.uf2
+          if-no-files-found: error
+
+      - name: Stage tagged release asset
+        # On tag push only — copy to a versioned filename so the
+        # Release page shows e.g. firmware-ProMicroDIY-v0.1.0.uf2.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cp firmware-ProMicroDIY.uf2 firmware-ProMicroDIY-${{ github.ref_name }}.uf2
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware-ProMicroDIY-${{ github.ref_name }}.uf2
+          fail_on_unmatched_files: true
+          generate_release_notes: true
