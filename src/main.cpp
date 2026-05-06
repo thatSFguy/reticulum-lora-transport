@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "Battery.h"
+#include "Ble.h"
 #include "Config.h"
 #include "ConfigProtocol.h"
 #include "ConfigStore.h"
@@ -211,7 +212,17 @@ void setup() {
                                            make_telemetry_snapshot());
                                    });
 
-    Serial.println(F("rlr: setup complete — Transport + LoRa + telemetry ready"));
+    // BLE config service. Same ConfigProtocol underneath as
+    // SerialConsole — only the transport adapter differs. Failure
+    // is non-fatal; SerialConsole still works.
+    auto save_fn = [](const rlr::Config& c) -> bool {
+        return rlr::config_store::save(c);
+    };
+    if (!rlr::ble::init(g_cfg, g_transport, save_fn)) {
+        Serial.println(F("rlr: BLE init failed; Serial-only config available"));
+    }
+
+    Serial.println(F("rlr: setup complete — Transport + LoRa + telemetry + BLE ready"));
 }
 
 void loop() {
@@ -234,9 +245,10 @@ void loop() {
     }
 
     // Drain any pending Serial frames and dispatch to ConfigProtocol.
-    // The save callback is the only firmware ↔ ConfigProtocol bridge:
-    // ConfigProtocol stays pure C++17 (test_config_protocol runs on
-    // native), and we wire it to the Arduino-only ConfigStore here.
+    // BLE has its own write-callback path so it doesn't need a tick.
+    // The save callback is identical for both; ConfigStore.save's
+    // diff-before-write keeps the flash discipline regardless of
+    // which transport committed.
     rlr::serial_console::tick(g_cfg, g_transport,
         [](const rlr::Config& c) -> bool {
             return rlr::config_store::save(c);
