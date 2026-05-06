@@ -179,6 +179,7 @@ bool start_rx() {
 
 bool online()     { return s_online; }
 bool rx_pending() { return s_rx_flag; }
+uint8_t random_byte() { return s_radio.randomByte(); }
 
 void stop() {
     s_radio.standby();

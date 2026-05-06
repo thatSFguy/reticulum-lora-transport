@@ -53,4 +53,10 @@ int read_pending(uint8_t* buf, size_t bufsize);
 // transmitted on success, -1 on error.
 int transmit(const uint8_t* buf, size_t len);
 
+// Single random byte from the SX1262's hardware RNG (RadioLib's
+// PhysicalLayer::randomByte — entropy from the RSSI noise floor).
+// Not high-throughput; suitable for one-time identity generation
+// at first boot. Caller must have called begin() successfully first.
+uint8_t random_byte();
+
 }} // namespace rlr::radio

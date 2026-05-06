@@ -13,6 +13,7 @@
 
 #include "Config.h"
 #include "Radio.h"
+#include "Storage.h"
 
 #include "rns/Bytes.h"
 #include "rns/Identity.h"
@@ -22,16 +23,7 @@
 
 namespace {
 
-// Placeholder identity for v0 firmware boot. Real firmware will load
-// from flash via Storage / Config (later PR). Hardcoded for now.
-//
-// SECURITY NOTE: every device flashed with this build shares the
-// same identity, which means cross-device messaging is broken AND a
-// captured device leaks its priv. Acceptable for "does it boot and
-// peer" bring-up; not for deployment.
-constexpr const char* PLACEHOLDER_PRIV_HEX =
-    "00000000000000000000000000000000000000000000000000000000000000aa"
-    "00000000000000000000000000000000000000000000000000000000000000bb";
+constexpr const char* IDENTITY_FILE = "/identity.bin";
 
 // LoRa effective bitrate at SF7 / BW250 / CR4/5 ≈ 10937 bps. Used
 // for the §12.3.1 announce-cap budget. Approximate — the cap is a
@@ -43,6 +35,34 @@ rns::Transport*     g_transport  = nullptr;
 rns::LoRaInterface* g_lora_iface = nullptr;
 rlr::Config         g_cfg;        // hardcoded defaults from Config.h
 
+// Load the persisted Identity from /identity.bin on internal flash,
+// or generate a fresh 64-byte priv (X25519(32) || Ed25519(32)) using
+// the SX1262's RNG and save it. Returns the constructed Identity.
+//
+// First-boot generation is the security-critical path. The radio's
+// random_byte() pulls from the chip's RSSI-noise-floor entropy
+// source — adequate for a one-shot 64-byte draw, not high-rate.
+//
+// Per memory `flash_wear_minimize_writes`: the priv only gets
+// written ONCE per device lifetime (first-boot generation). All
+// subsequent boots load from flash with no write.
+rns::Identity load_or_generate_identity() {
+    uint8_t priv[64];
+    int n = rlr::storage::load_file(IDENTITY_FILE, priv, sizeof(priv));
+    if (n == 64) {
+        Serial.println(F("rlr: identity loaded from flash"));
+        return rns::Identity::from_private_bytes(rns::Bytes(priv, 64));
+    }
+
+    Serial.println(F("rlr: no stored identity — generating fresh"));
+    for (int i = 0; i < 64; ++i) priv[i] = rlr::radio::random_byte();
+    if (!rlr::storage::save_file(IDENTITY_FILE, priv, 64)) {
+        Serial.println(F("rlr: WARNING — failed to persist identity, "
+                          "will regenerate next boot"));
+    }
+    return rns::Identity::from_private_bytes(rns::Bytes(priv, 64));
+}
+
 }  // namespace
 
 void setup() {
@@ -50,7 +70,16 @@ void setup() {
     delay(50);
     Serial.println(F("rlr: setup begin"));
 
-    // Radio bring-up.
+    // Storage MUST mount before identity load — load_or_generate
+    // calls rlr::storage::load_file. Failures here are non-fatal
+    // (we'll just regenerate identity on every boot — bad but boots).
+    if (!rlr::storage::init()) {
+        Serial.println(F("rlr: WARNING — storage init failed; "
+                          "identity will not persist"));
+    }
+
+    // Radio bring-up MUST precede identity generation — random_byte()
+    // requires begin() to have run.
     if (!rlr::radio::init_hardware()) {
         Serial.println(F("rlr: radio init_hardware FAILED"));
     } else if (!rlr::radio::begin(g_cfg)) {
@@ -59,9 +88,9 @@ void setup() {
         Serial.println(F("rlr: radio start_rx() FAILED"));
     }
 
-    // Identity + Transport.
-    auto identity = rns::Identity::from_private_bytes(
-        rns::Bytes::from_hex(PLACEHOLDER_PRIV_HEX));
+    // Identity + Transport. Loaded from flash if present, otherwise
+    // generated fresh from the radio's RNG and persisted.
+    auto identity = load_or_generate_identity();
     g_transport = new rns::Transport(std::move(identity),
                                      /*transport_enabled=*/true);
 
