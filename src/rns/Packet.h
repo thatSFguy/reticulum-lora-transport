@@ -32,6 +32,7 @@ public:
     // implemented.
     static constexpr uint8_t CONTEXT_NONE          = 0x00;
     static constexpr uint8_t CONTEXT_PATH_RESPONSE = 0x0B;
+    static constexpr uint8_t CONTEXT_LRPROOF       = 0xFF;
 
     static constexpr size_t  DEST_HASH_LEN     = 16;
     static constexpr size_t  TRANSPORT_ID_LEN  = 16;
@@ -97,6 +98,17 @@ public:
     uint8_t        context()          const { return _context; }
     const Bytes&   data()             const { return _data; }           // body (everything after context)
     const Bytes&   wire_bytes()       const { return _raw; }
+
+    // SPEC §6.3 — the "hashable part" used as the common substrate for
+    //   §13.4 dedup hash
+    //   §12.2.5 reverse_table key (truncated)
+    //   §6.3 link_id derivation (with LINKREQUEST signalling strip)
+    //   §6.5.1 PROOF packet_hash
+    // Strips header_type / context_flag / transport_type bits (top
+    // nibble of flags), the hops byte, and the HEADER_2 transport_id —
+    // every field a relay can rewrite. Result is invariant across
+    // HEADER_1↔HEADER_2 conversion and per-hop rewriting.
+    Bytes hashable_part() const;
 
 private:
     Packet() = default;

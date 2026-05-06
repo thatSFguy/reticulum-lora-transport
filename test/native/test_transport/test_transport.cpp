@@ -101,16 +101,12 @@ Bytes alice_announce_header_2(const Bytes& transport_id, uint8_t hops) {
 }
 
 // Construct the truncated-hash key the relay uses for reverse_table
-// entries — must match Transport::dedup_hash()[:16] computed over the
-// post-bump form of the DATA packet that the relay observed.
+// entries — Transport.dedup_hash() over the post-bump packet,
+// truncated to 16 bytes. Both compute SHA-256 of the §6.3 hashable
+// part, so the helper just calls into Packet::hashable_part.
 Bytes reverse_key_for(const Bytes& data_wire_post_bump) {
     Packet p = Packet::from_wire_bytes(data_wire_post_bump);
-    Bytes material;
-    material.append(p.flags());
-    material.append(p.destination_hash());
-    material.append(p.context());
-    material.append(p.data());
-    return rns::crypto::sha256(material).slice(0, 16);
+    return rns::crypto::sha256(p.hashable_part()).slice(0, 16);
 }
 
 // Synthesize a PROOF packet whose dest_hash is the truncated hash of
@@ -133,6 +129,63 @@ Bytes synth_path_request(const Bytes& target, const Bytes& tag,
     body.append(tag);
     return Packet::pack_header_1(/*flags=*/0x08, /*hops=*/0,
                                  Transport::path_request_destination_hash(),
+                                 Packet::CONTEXT_NONE, body);
+}
+
+constexpr const char* ALICE_PRIV_HEX_FOR_LINK =
+    "587e730a70d24e971efa8c146e554996d70bff45b2033d336e2c078dc63d3645"
+    "bef79d95bf6b253827a2e7e81a13ab0b10a908fd158581d1827095b788169e93";
+
+Identity alice_identity() {
+    return Identity::from_private_bytes(Bytes::from_hex(ALICE_PRIV_HEX_FOR_LINK));
+}
+
+// flags for HEADER_2 LINKREQUEST: HEADER_2 (0x40) | TRANSPORT (0x10) |
+// SINGLE (00) | LINKREQUEST (10) = 0x52
+constexpr uint8_t LR_HEADER_2_FLAGS = 0x52;
+
+// 64-byte body: initiator_X25519_pub(32) || initiator_Ed25519_pub(32).
+// Relays don't validate these — keys can be arbitrary.
+Bytes synth_link_request(const Bytes& transport_id, const Bytes& dest_hash,
+                         uint8_t hops = 0) {
+    Bytes body;
+    body.append(Bytes(32));  // init_x25519_pub — zeros are fine for relay tests
+    body.append(Bytes(32));  // init_ed25519_pub
+    return Packet::pack_header_2(LR_HEADER_2_FLAGS, hops, transport_id,
+                                 dest_hash, Packet::CONTEXT_NONE, body);
+}
+
+// flags for HEADER_1 LRPROOF: HEADER_1 (00) | BROADCAST (0) | LINK (11) |
+// PROOF (11) = 0x0F
+constexpr uint8_t LRPROOF_FLAGS = 0x0F;
+
+// Build an LRPROOF wire bytes signed by `responder`'s long-term
+// Ed25519 priv. body = signature(64) || responder_x25519_pub(32).
+Bytes synth_lrproof(const Bytes& link_id, const Bytes& responder_x_pub,
+                    const Identity& responder, uint8_t hops = 0) {
+    Bytes signed_data;
+    signed_data.append(link_id);
+    signed_data.append(responder_x_pub);
+    signed_data.append(responder.ed25519_pub());
+
+    Bytes ed_priv = responder.ed25519_priv();
+    Bytes sig = rns::crypto::ed25519_sign(ed_priv,
+                                           signed_data.data(),
+                                           signed_data.size());
+
+    Bytes body;
+    body.append(sig);
+    body.append(responder_x_pub);
+    return Packet::pack_header_1(LRPROOF_FLAGS, hops, link_id,
+                                 Packet::CONTEXT_LRPROOF, body);
+}
+
+// flags for HEADER_1 Link DATA: HEADER_1 (00) | BROADCAST (0) | LINK (11) |
+// DATA (00) = 0x0C
+constexpr uint8_t LINK_DATA_FLAGS = 0x0C;
+
+Bytes synth_link_data(const Bytes& link_id, const Bytes& body, uint8_t hops = 0) {
+    return Packet::pack_header_1(LINK_DATA_FLAGS, hops, link_id,
                                  Packet::CONTEXT_NONE, body);
 }
 
@@ -895,6 +948,293 @@ void test_path_request_transport_mode_payload_parses() {
     TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());
 }
 
+// §12.2.4 + §6.3 — relay forwards a LINKREQUEST and writes a
+// link_table entry keyed by the link_id. 1-hop case (path.hops == 1)
+// strips the transport_id per §12.2.2.
+void test_link_request_forward_last_hop() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // Alice on out_iface, 1 hop away after the inbound bump.
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    Bytes lr_wire = synth_link_request(t.local_identity().identity_hash(),
+                                       alice_dest, /*hops=*/0);
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    TEST_ASSERT_TRUE(t.link_table().empty());
+
+    t.inbound(&in_iface, lr_wire, /*now_ms=*/2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_requests_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, t.link_table().size());
+
+    // Forwarded as HEADER_1 broadcast on out_iface.
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+    Packet emitted = Packet::from_wire_bytes(out_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_1);
+    TEST_ASSERT_TRUE(emitted.packet_type() == Packet::PacketType::LINKREQUEST);
+    TEST_ASSERT_EQUAL_UINT8(1, emitted.hops());
+
+    // link_id is invariant across header form — compute from the wire
+    // we sent in (post-bump, but link_id excludes hops anyway).
+    Bytes wire_post_bump = lr_wire;
+    wire_post_bump[1] = 1;
+    Packet inbound_pkt = Packet::from_wire_bytes(wire_post_bump);
+    Bytes expected_link_id = Transport::link_id_from_lr_packet(inbound_pkt);
+
+    const auto* entry = t.link_table().get(expected_link_id);
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_PTR(&in_iface,  entry->rcvd_if);
+    TEST_ASSERT_EQUAL_PTR(&out_iface, entry->nh_if);
+    TEST_ASSERT_FALSE(entry->validated);
+    TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH, entry->dst_hash.to_hex().c_str());
+}
+
+// §12.2.4 + §12.2.1 — multi-hop LINKREQUEST forward: path.hops > 1
+// keeps HEADER_2 and replaces transport_id with path.next_hop.
+void test_link_request_forward_multi_hop() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // Seed alice via HEADER_2 announce with hops=2 → post-bump 3,
+    // path.hops=3, path.next_hop=upstream_id.
+    Bytes upstream_id = Bytes::from_hex("aabbccddeeff00112233445566778899");
+    t.inbound(&out_iface, alice_announce_header_2(upstream_id, 2), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    Bytes lr_wire = synth_link_request(t.local_identity().identity_hash(),
+                                       alice_dest);
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    t.inbound(&in_iface, lr_wire, 2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_requests_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+
+    Packet emitted = Packet::from_wire_bytes(out_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_STRING(upstream_id.to_hex().c_str(),
+                             emitted.transport_id().to_hex().c_str());
+    TEST_ASSERT_EQUAL_UINT8(1, emitted.hops());
+}
+
+// Helper for the LRPROOF / Link-DATA tests: returns Transport with
+// alice's announce + LINKREQUEST forwarded, link_table populated but
+// not yet validated. Returns the link_id via out param.
+struct LinkSetup {
+    Bytes link_id;
+    Bytes initiator_x_pub;  // never used by relay but tests might
+};
+LinkSetup setup_link_pending(Transport& t,
+                             StubInterface& in_iface,
+                             StubInterface& out_iface) {
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    Bytes lr_wire = synth_link_request(t.local_identity().identity_hash(),
+                                       alice_dest);
+    t.inbound(&in_iface, lr_wire, 2000);
+
+    Bytes wire_post_bump = lr_wire;
+    wire_post_bump[1] = 1;
+    Packet pkt = Packet::from_wire_bytes(wire_post_bump);
+
+    LinkSetup s;
+    s.link_id = Transport::link_id_from_lr_packet(pkt);
+    s.initiator_x_pub = Bytes(32);
+    return s;
+}
+
+// §12.5.1 — valid LRPROOF arriving on nh_if (responder direction)
+// gets forwarded on rcvd_if and marks the link_table entry validated.
+void test_link_proof_validates_and_forwards() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+
+    Bytes responder_eph_x = Bytes::from_hex(
+        "1111111111111111111111111111111111111111111111111111111111111111");
+    Bytes lrproof = synth_lrproof(s.link_id, responder_eph_x, alice_identity());
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    t.inbound(&out_iface, lrproof, /*now_ms=*/3000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_proofs_forwarded);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_proofs_invalid);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_proofs_wrong_iface);
+
+    // Forwarded back toward the initiator (in_iface).
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+
+    // Entry now validated.
+    const auto* entry = t.link_table().get(s.link_id);
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_TRUE(entry->validated);
+}
+
+// §12.5.1 — bad signature on LRPROOF: drop, no forward, not validated.
+void test_link_proof_bad_signature_rejected() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+
+    Bytes responder_eph_x = Bytes(32);
+    Bytes lrproof = synth_lrproof(s.link_id, responder_eph_x, alice_identity());
+    // Tamper one byte of the signature (offset 19 in HEADER_1 wire =
+    // start of body; signature is body[0:64]).
+    lrproof[19] ^= 0x01;
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    t.inbound(&out_iface, lrproof, 3000);
+
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_proofs_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_proofs_invalid);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_FALSE(t.link_table().get(s.link_id)->validated);
+}
+
+// §12.5.1 — LRPROOF arriving on the wrong interface (not nh_if):
+// drop, count link_proofs_wrong_iface, entry stays for the legitimate
+// PROOF that may follow.
+void test_link_proof_wrong_interface_drops_without_consuming() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface, third_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    t.register_interface(&third_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+
+    Bytes responder_eph_x = Bytes(32);
+    Bytes lrproof = synth_lrproof(s.link_id, responder_eph_x, alice_identity());
+
+    third_iface.emitted.clear();
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    t.inbound(&third_iface, lrproof, 3000);
+
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_proofs_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_proofs_wrong_iface);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+
+    // Entry is still there. A subsequent legitimate PROOF on out_iface
+    // (= nh_if) must work — use a different responder ephemeral so
+    // §13.4 dedup doesn't catch the resend.
+    Bytes responder_eph_x2 = Bytes::from_hex(
+        "0202020202020202020202020202020202020202020202020202020202020202");
+    Bytes lrproof2 = synth_lrproof(s.link_id, responder_eph_x2, alice_identity());
+    t.inbound(&out_iface, lrproof2, 3100);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_proofs_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
+    TEST_ASSERT_TRUE(t.link_table().get(s.link_id)->validated);
+}
+
+// LRPROOF for a link_id we never forwarded a LINKREQUEST for: drop.
+void test_link_proof_unknown_link() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes fake_link_id = Bytes::from_hex("00112233445566778899aabbccddeeff");
+    Bytes lrproof = synth_lrproof(fake_link_id, Bytes(32), alice_identity());
+
+    t.inbound(&iface, lrproof, 1000);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_proofs_unknown_link);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_proofs_forwarded);
+}
+
+// §12.5.2 — Link DATA forwarding: initiator → responder direction.
+void test_link_data_initiator_to_responder() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+
+    // Validate the link first (otherwise Link DATA is rejected).
+    Bytes lrproof = synth_lrproof(s.link_id, Bytes(32), alice_identity());
+    t.inbound(&out_iface, lrproof, 3000);
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    Bytes link_data = synth_link_data(s.link_id, Bytes::from_hex("deadbeef"));
+    t.inbound(&in_iface, link_data, 3500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_data_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+}
+
+// §12.5.2 — Link DATA forwarding: responder → initiator direction.
+void test_link_data_responder_to_initiator() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+    Bytes lrproof = synth_lrproof(s.link_id, Bytes(32), alice_identity());
+    t.inbound(&out_iface, lrproof, 3000);
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    Bytes link_data = synth_link_data(s.link_id, Bytes::from_hex("cafef00d"));
+    t.inbound(&out_iface, link_data, 3500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_data_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+}
+
+// §12.5.2 — Link DATA before the link is validated drops; link_table
+// entry exists but pre-LRPROOF traffic isn't forwarded.
+void test_link_data_before_validation_is_dropped() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    Bytes link_data = synth_link_data(s.link_id, Bytes::from_hex("11"));
+    t.inbound(&in_iface, link_data, 2500);
+
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_data_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_data_unvalidated);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+}
+
+// Link DATA for an unknown link_id drops.
+void test_link_data_unknown_link() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes fake = Bytes::from_hex("ffffffffffffffffffffffffffffffff");
+    Bytes link_data = synth_link_data(fake, Bytes::from_hex("22"));
+    t.inbound(&iface, link_data, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_data_unknown_link);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().link_data_forwarded);
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -941,6 +1281,16 @@ int main(int argc, char** argv) {
     RUN_TEST(test_path_request_tagless_drop);
     RUN_TEST(test_path_request_dedup_by_target_and_tag);
     RUN_TEST(test_path_request_transport_mode_payload_parses);
+    RUN_TEST(test_link_request_forward_last_hop);
+    RUN_TEST(test_link_request_forward_multi_hop);
+    RUN_TEST(test_link_proof_validates_and_forwards);
+    RUN_TEST(test_link_proof_bad_signature_rejected);
+    RUN_TEST(test_link_proof_wrong_interface_drops_without_consuming);
+    RUN_TEST(test_link_proof_unknown_link);
+    RUN_TEST(test_link_data_initiator_to_responder);
+    RUN_TEST(test_link_data_responder_to_initiator);
+    RUN_TEST(test_link_data_before_validation_is_dropped);
+    RUN_TEST(test_link_data_unknown_link);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

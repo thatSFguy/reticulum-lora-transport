@@ -26,6 +26,7 @@
 #include "rns/Bytes.h"
 #include "rns/Identity.h"
 #include "rns/tables/AnnounceTable.h"
+#include "rns/tables/LinkTable.h"
 #include "rns/tables/PacketHashList.h"
 #include "rns/tables/PathTable.h"
 #include "rns/tables/ReverseTable.h"
@@ -71,6 +72,14 @@ public:
     // Constant value `6b9f66014d9853faab220fba47d02761`.
     static const Bytes& path_request_destination_hash();
 
+    // §6.3 — link_id from a LINKREQUEST packet:
+    // SHA256(hashable_part)[:16], with the 3-byte signalling trailer
+    // stripped if present (§6.6). Same value at initiator (HEADER_1),
+    // responder (post-relay HEADER_2), and any relay in between.
+    // Static so tests, link initiators, and the relay all compute it
+    // identically.
+    static Bytes link_id_from_lr_packet(const Packet& packet);
+
     // Periodic driver. Walks each registered interface's `tick()`,
     // evicts path entries past their `expires_ms`, and purges the
     // hashlist if over cap (§13.4).
@@ -88,6 +97,7 @@ public:
     const PacketHashList& hashlist()           const { return _hashlist; }
     const AnnounceTable&  announce_table()     const { return _announce_table; }
     const ReverseTable&   reverse_table()      const { return _reverse_table; }
+    const LinkTable&      link_table()         const { return _link_table; }
     size_t                known_count()        const { return _known_destinations.size(); }
 
     // §4.5 step 6.1 — `Identity.recall(dest_hash)` analogue. Returns
@@ -121,6 +131,14 @@ public:
         uint64_t path_requests_deduped    = 0;  // §7.2.2 — (target||tag) seen before
         uint64_t path_requests_answered   = 0;  // §7.2.3 branch 2 emit
         uint64_t path_requests_unanswered = 0;  // unknown target / leaf with no local match
+        uint64_t link_requests_forwarded  = 0;  // §12.2.4 link_table written
+        uint64_t link_proofs_forwarded    = 0;  // §12.5.1 LRPROOF validated + forwarded
+        uint64_t link_proofs_invalid      = 0;  // bad signature or unknown responder pub
+        uint64_t link_proofs_unknown_link = 0;  // link_id not in link_table
+        uint64_t link_proofs_wrong_iface  = 0;  // arrived on the wrong direction
+        uint64_t link_data_forwarded      = 0;  // §12.5.2 emits
+        uint64_t link_data_unknown_link   = 0;  // dest_hash not in link_table
+        uint64_t link_data_unvalidated    = 0;  // link not yet established
     };
     const Stats& stats() const { return _stats; }
 
@@ -136,6 +154,7 @@ private:
     PacketHashList  _hashlist;
     AnnounceTable   _announce_table;
     ReverseTable    _reverse_table;
+    LinkTable       _link_table;
     PacketHashList  _pr_tags{MAX_PR_TAGS};
     std::unordered_map<std::string, Bytes> _known_destinations;  // dest_hash → 64B pub
     std::vector<Interface*>      _interfaces;
@@ -171,6 +190,35 @@ private:
     // the cached distance from us. The receiver bumps it on inbound
     // and learns the destination is one further than that.
     void emit_path_response(Interface* out, const PathEntry& path);
+
+    // §12.2.4 — relay forwards a LINKREQUEST and writes a link_table
+    // entry. Same §12.2 entry conditions and §12.2.1/2 wire
+    // transformation as DATA forwarding; the post-forward table is
+    // the only difference.
+    void handle_link_request_forward(Interface* received_on,
+                                     const Packet& packet, uint64_t now_ms);
+
+    // §12.5.1 — LRPROOF validation and forwarding. Looks up
+    // link_table[packet.destination_hash() (= link_id)], peeks the
+    // entry, validates the §6.2 signature against the responder's
+    // known long-term Ed25519 public key, forwards on rcvd_if, and
+    // marks `validated = true`. Failure modes drop without
+    // consuming the link_table entry — peek-then-pop discipline
+    // (see memory: table_peek_then_pop_pattern).
+    void handle_link_proof_forward(Interface* received_on, const Packet& packet);
+
+    // §12.5.2 — Link DATA forwarding. Bidirectional: forwards on
+    // nh_if when the packet arrived on rcvd_if, and vice versa. Skips
+    // unvalidated links (LRPROOF hasn't completed yet).
+    void handle_link_data_forward(Interface* received_on, const Packet& packet);
+
+    // Apply §12.2.1/2 wire transformation per the path entry's hops
+    // value and emit on path.receiving_interface. Returns the
+    // outbound interface used, or nullptr if the packet wasn't
+    // forwarded (no path / missing next_hop / etc.). Caller is
+    // responsible for any post-emit table write (reverse_table for
+    // DATA, link_table for LINKREQUEST).
+    Interface* relay_forward_via_path(const Packet& packet, const PathEntry& path);
 
     // §4.5 step 6.1 — record a freshly-validated announce's pubkey,
     // and update the path entry (timestamp / hops / next_hop /

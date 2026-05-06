@@ -42,18 +42,11 @@ const Bytes* Transport::public_key_for(const Bytes& dest_hash) const {
 std::string Transport::key_of(const Bytes& b) { return b.to_hex(); }
 
 Bytes Transport::dedup_hash(const Packet& p) {
-    // SPEC: upstream RNS hashes a "hashable part" that excludes the
-    // hops byte (and for HEADER_2 the transport_id) so that the same
-    // logical packet seen via different paths dedups. We approximate
-    // by hashing flags || dest_hash || context || body — fields that
-    // are stable across hops. This will need verification once the
-    // spec section pins the exact definition.
-    Bytes material;
-    material.append(p.flags());
-    material.append(p.destination_hash());
-    material.append(p.context());
-    material.append(p.data());
-    return crypto::sha256(material);
+    // §13.4 dedup over the §6.3 "hashable part" — full SHA-256 of the
+    // bytes a relay can't rewrite (low nibble of flags + dest_hash +
+    // context + body). Same primitive used for §12.2.5 reverse_table
+    // keys (truncated to 16) and §6.5.1 PROOF packet_hash.
+    return crypto::sha256(p.hashable_part());
 }
 
 void Transport::tick(uint64_t now_ms) {
@@ -61,6 +54,7 @@ void Transport::tick(uint64_t now_ms) {
     for (Interface* i : _interfaces) i->tick(now_ms);
     _paths.evict_expired(now_ms);
     _reverse_table.evict_aged(now_ms);
+    _link_table.evict_unproven(now_ms);
     _hashlist.purge_if_over_cap();
     _pr_tags.purge_if_over_cap();
 }
@@ -119,11 +113,19 @@ void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_
         // addressed to a well-known constant, not via transport_id.
         if (packet.destination_hash() == path_request_destination_hash()) {
             handle_path_request(received_on, packet);
-        } else if (packet.destination_type() != Packet::DestinationType::LINK) {
+        } else if (packet.destination_type() == Packet::DestinationType::LINK) {
+            handle_link_data_forward(received_on, packet);
+        } else {
             handle_data_forward(received_on, packet, now_ms);
         }
+    } else if (packet.packet_type() == Packet::PacketType::LINKREQUEST) {
+        handle_link_request_forward(received_on, packet, now_ms);
     } else if (packet.packet_type() == Packet::PacketType::PROOF) {
-        handle_proof_forward(received_on, packet);
+        if (packet.context() == Packet::CONTEXT_LRPROOF) {
+            handle_link_proof_forward(received_on, packet);
+        } else {
+            handle_proof_forward(received_on, packet);
+        }
     }
 }
 
@@ -189,6 +191,26 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
     }
 }
 
+Interface* Transport::relay_forward_via_path(const Packet& packet,
+                                             const PathEntry& path) {
+    if (!path.receiving_interface) return nullptr;
+    const uint8_t remaining = path.hops;
+    if (remaining > 1) {
+        // §12.2.1 — replace transport_id with path.next_hop.
+        if (path.next_hop.size() != Packet::TRANSPORT_ID_LEN) return nullptr;
+        Packet forwarded = packet.replace_transport_id(path.next_hop);
+        path.receiving_interface->transmit_now(forwarded.wire_bytes());
+        return path.receiving_interface;
+    }
+    if (remaining == 1) {
+        // §12.2.2 — strip transport_id, broadcast HEADER_1.
+        Packet forwarded = packet.strip_transport_id_to_header_1();
+        path.receiving_interface->transmit_now(forwarded.wire_bytes());
+        return path.receiving_interface;
+    }
+    return nullptr;  // §12.2.3 local — caller handles
+}
+
 void Transport::handle_data_forward(Interface* received_on, const Packet& packet,
                                     uint64_t now_ms) {
     _stats.data_inbound++;
@@ -199,32 +221,9 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
     if (packet.transport_id() != _local.identity_hash())     return;
 
     const PathEntry* path = _paths.get(packet.destination_hash());
-    if (!path)                          return;
-    if (!path->receiving_interface)     return;
+    if (!path) return;
 
-    const uint8_t remaining = path->hops;
-    Interface* outbound_if = nullptr;
-
-    if (remaining > 1) {
-        // §12.2.1 — replace transport_id with path.next_hop, keep
-        // HEADER_2. Skip if we don't actually have a next_hop cached
-        // (the path entry came from a HEADER_1 announce and the
-        // origin is supposed to be 1 hop away, but the path's hops
-        // field disagrees — defensively drop).
-        if (path->next_hop.size() != Packet::TRANSPORT_ID_LEN) return;
-        Packet forwarded = packet.replace_transport_id(path->next_hop);
-        path->receiving_interface->transmit_now(forwarded.wire_bytes());
-        outbound_if = path->receiving_interface;
-        _stats.data_forwarded_header_2++;
-    } else if (remaining == 1) {
-        // §12.2.2 — strip transport_id, broadcast as HEADER_1. Last
-        // hop: dest is on the same interface and will hear the
-        // broadcast directly.
-        Packet forwarded = packet.strip_transport_id_to_header_1();
-        path->receiving_interface->transmit_now(forwarded.wire_bytes());
-        outbound_if = path->receiving_interface;
-        _stats.data_forwarded_header_1++;
-    } else {
+    if (path->hops == 0) {
         // §12.2.3 — local destination. Hand-off to local Destination
         // dispatch lands when local destinations are registered on
         // Transport. No reverse_table entry here — PROOF for a local
@@ -233,12 +232,13 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
         return;
     }
 
+    Interface* outbound_if = relay_forward_via_path(packet, *path);
+    if (!outbound_if) return;
+
+    if (path->hops > 1) _stats.data_forwarded_header_2++;
+    else                _stats.data_forwarded_header_1++;
+
     // §12.2.5 — record where to send the eventual PROOF receipt.
-    // Keyed by truncated SHA-256 of the packet's hashable part —
-    // §6.5 says the PROOF will arrive with that value as its
-    // dest_hash. The originator-emitted DATA's hashable part
-    // matches what we forwarded (we changed only the transport_id /
-    // header form / hops, none of which are in the hashable bytes).
     ReverseEntry entry;
     entry.packet_hash  = dedup_hash(packet).slice(0, 16);
     entry.received_if  = received_on;
@@ -348,6 +348,143 @@ void Transport::emit_path_response(Interface* out, const PathEntry& path) {
     // which matches branch 2's "this is a path-resolver answer, not
     // a periodic re-announce" semantic.
     out->transmit_now(wire);
+}
+
+Bytes Transport::link_id_from_lr_packet(const Packet& packet) {
+    // §6.3 hashable_part with the LINKREQUEST-specific quirk: the
+    // trailing 3-byte signalling field (when present, body > 64
+    // bytes) is stripped before hashing so the link_id is invariant
+    // under §6.6 MTU-discovery signalling.
+    Bytes hp = packet.hashable_part();
+    constexpr size_t ECPUBSIZE = 64;  // X25519(32) + Ed25519(32)
+    if (packet.data().size() > ECPUBSIZE && hp.size() >= 3) {
+        hp.resize(hp.size() - 3);
+    }
+    return crypto::sha256(hp).slice(0, 16);
+}
+
+void Transport::handle_link_request_forward(Interface* received_on,
+                                            const Packet& packet,
+                                            uint64_t now_ms) {
+    // §12.2 entry conditions, same as DATA forwarding: HEADER_2 with
+    // our identity_hash as transport_id, and a path entry exists.
+    if (packet.header_type() != Packet::HeaderType::HEADER_2) return;
+    if (packet.transport_id() != _local.identity_hash())     return;
+
+    const PathEntry* path = _paths.get(packet.destination_hash());
+    if (!path) return;
+    if (path->hops == 0) return;  // local responder — TBD
+
+    Interface* outbound_if = relay_forward_via_path(packet, *path);
+    if (!outbound_if) return;
+
+    // §12.2.4 — write link_table entry keyed by §6.3 link_id. The
+    // hashable_part for the link_id is computed from the packet as
+    // received (post inbound hops bump), but link_id strips fields
+    // a relay rewrites — so the value matches what initiator and
+    // responder compute on their own copies.
+    LinkEntry entry;
+    entry.link_id          = link_id_from_lr_packet(packet);
+    entry.timestamp_ms     = now_ms;
+    entry.next_hop_id      = path->next_hop;        // toward responder
+    entry.nh_if            = outbound_if;
+    entry.rem_hops         = (path->hops > 0) ? path->hops - 1 : 0;
+    entry.rcvd_if          = received_on;
+    entry.taken_hops       = packet.hops();
+    entry.dst_hash         = packet.destination_hash();
+    entry.validated        = false;
+    // Un-validated entries age out via tick(). 60s default matches
+    // upstream Link.LINK_ESTABLISHMENT_TIMEOUT order-of-magnitude.
+    entry.proof_timeout_ms = now_ms + 60ULL * 1000ULL;
+    _link_table.put(std::move(entry));
+    _stats.link_requests_forwarded++;
+}
+
+void Transport::handle_link_proof_forward(Interface* received_on,
+                                          const Packet& packet) {
+    // packet.destination_hash() carries the link_id (§6.2 — LRPROOF's
+    // dest_hash IS the link_id, unlike opportunistic-DATA PROOFs).
+    const LinkEntry* entry = _link_table.get(packet.destination_hash());
+    if (!entry) {
+        _stats.link_proofs_unknown_link++;
+        return;
+    }
+    if (entry->nh_if != received_on) {
+        // §12.5.1 — LRPROOF must arrive on the responder direction
+        // (nh_if). Anything else is a spoof; drop without consuming
+        // the entry (peek-then-pop).
+        _stats.link_proofs_wrong_iface++;
+        return;
+    }
+
+    // §6.2 signature verification. Body layout:
+    //   signature(64) || responder_X25519_pub(32) || [signalling(3)]
+    const Bytes& body = packet.data();
+    if (body.size() != 96 && body.size() != 99) {
+        _stats.link_proofs_invalid++;
+        return;
+    }
+    Bytes signature       = body.slice(0, 64);
+    Bytes responder_x_pub = body.slice(64, 32);
+    Bytes signalling      = (body.size() == 99) ? body.slice(96, 3) : Bytes{};
+
+    // Pull the responder's long-term Ed25519 pub from the cached
+    // public_key (X25519(32) || Ed25519(32) per §1.1).
+    const Bytes* responder_pub = public_key_for(entry->dst_hash);
+    if (!responder_pub || responder_pub->size() != Identity::PUB_KEY_LEN) {
+        _stats.link_proofs_invalid++;
+        return;
+    }
+    Bytes responder_ed_pub = responder_pub->slice(32, 32);
+
+    Bytes signed_data;
+    signed_data.append(packet.destination_hash());  // link_id
+    signed_data.append(responder_x_pub);
+    signed_data.append(responder_ed_pub);
+    signed_data.append(signalling);                 // empty if absent
+    if (!crypto::ed25519_verify(responder_ed_pub, signature,
+                                signed_data.data(), signed_data.size())) {
+        _stats.link_proofs_invalid++;
+        return;
+    }
+
+    // Forward back toward the initiator. hops byte was already bumped
+    // on inbound, so emit the wire as-is.
+    Interface* fwd = entry->rcvd_if;
+    if (!fwd) {
+        _stats.link_proofs_invalid++;
+        return;
+    }
+    fwd->transmit_now(packet.wire_bytes());
+    _stats.link_proofs_forwarded++;
+
+    // Mark validated — subsequent Link DATA forwards either way.
+    if (LinkEntry* mut = _link_table.get_mut(packet.destination_hash())) {
+        mut->validated = true;
+    }
+}
+
+void Transport::handle_link_data_forward(Interface* received_on,
+                                         const Packet& packet) {
+    const LinkEntry* entry = _link_table.get(packet.destination_hash());
+    if (!entry) {
+        _stats.link_data_unknown_link++;
+        return;
+    }
+    if (!entry->validated) {
+        // §12.5.2 implicit — pre-LRPROOF Link DATA shouldn't exist.
+        _stats.link_data_unvalidated++;
+        return;
+    }
+
+    // §12.5.2 — direction: opposite of the interface this arrived on.
+    Interface* fwd = nullptr;
+    if (received_on == entry->rcvd_if)      fwd = entry->nh_if;
+    else if (received_on == entry->nh_if)   fwd = entry->rcvd_if;
+    if (!fwd) return;  // arrived on a third interface — drop silently
+
+    fwd->transmit_now(packet.wire_bytes());
+    _stats.link_data_forwarded++;
 }
 
 bool Transport::cache_validated_announce(const ValidatedAnnounce& va,

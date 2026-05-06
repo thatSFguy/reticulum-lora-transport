@@ -119,6 +119,17 @@ Packet Packet::strip_transport_id_to_header_1() const {
     return from_wire_bytes(new_raw);
 }
 
+Bytes Packet::hashable_part() const {
+    // §6.3: low nibble of flags || raw[N:]
+    //   N = 2  for HEADER_1   (strip flags + hops)
+    //   N = 18 for HEADER_2   (strip flags + hops + transport_id)
+    Bytes out;
+    out.append(static_cast<uint8_t>(_flags & 0x0F));
+    const size_t n = (header_type() == HeaderType::HEADER_1) ? 2 : 18;
+    if (_raw.size() > n) out.append(_raw.slice(n));
+    return out;
+}
+
 AnnounceBody parse_announce_body(const Bytes& body, bool context_flag) {
     // §4.5 step 1 — slice offsets keyed by context_flag.
     constexpr size_t PUB_LEN     = 64;
