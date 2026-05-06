@@ -274,17 +274,25 @@ void test_originator_to_header_2() {
     TEST_ASSERT_EQUAL_STRING(p.data().to_hex().c_str(), p2.data().to_hex().c_str());
 }
 
-// §2.3 — context_flag (bit 5) is dropped during conversion. The
-// ratchet-bearing vector exercises this.
-void test_originator_to_header_2_clears_context_flag() {
+// §2.3 / §12.3 — context_flag (bit 5) MUST be preserved during
+// conversion. For ANNOUNCE the bit means "ratchet present"; if a
+// relay drops it but keeps the ratchet bytes in the body, the next
+// hop mis-parses the body (treats the first 32 bytes of ratchet as
+// signature) and signature verification fails. The ratchet-bearing
+// vector pins this.
+void test_originator_to_header_2_preserves_context_flag() {
     Bytes raw = Bytes::from_hex(ALICE_WITH_RATCHET.wire_bytes_hex);
     Packet p  = Packet::from_wire_bytes(raw);
     TEST_ASSERT_TRUE(p.context_flag());  // 0x21 source flag
     Packet p2 = p.originator_to_header_2(
         Bytes::from_hex("aabbccddeeff00112233445566778899"));
-    // 0x21 & 0x0F = 0x01 → 0x40 | 0x10 | 0x01 = 0x51
-    TEST_ASSERT_EQUAL_UINT8(0x51, p2.flags());
-    TEST_ASSERT_FALSE(p2.context_flag());
+    // 0x21 & 0x2F = 0x21 → 0x40 | 0x20 | 0x10 | 0x01 = 0x71
+    TEST_ASSERT_EQUAL_UINT8(0x71, p2.flags());
+    TEST_ASSERT_TRUE(p2.context_flag());
+    // Body bytes are byte-for-byte preserved (the ratchet survives
+    // the hop intact).
+    TEST_ASSERT_EQUAL_STRING(p.data().to_hex().c_str(),
+                             p2.data().to_hex().c_str());
 }
 
 void test_originator_to_header_2_rejects_already_header_2() {
@@ -410,7 +418,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_pack_header_1_round_trip);
     RUN_TEST(test_pack_header_2_round_trip);
     RUN_TEST(test_originator_to_header_2);
-    RUN_TEST(test_originator_to_header_2_clears_context_flag);
+    RUN_TEST(test_originator_to_header_2_preserves_context_flag);
     RUN_TEST(test_originator_to_header_2_rejects_already_header_2);
     RUN_TEST(test_replace_transport_id);
     RUN_TEST(test_replace_transport_id_rejects_header_1);

@@ -268,13 +268,25 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
     if (_transport_enabled
         && packet.context() != Packet::CONTEXT_PATH_RESPONSE
         && blob_is_new) {
+        // §12.3 — a relay forwards the announce as HEADER_2 with its
+        // own identity_hash as transport_id. HEADER_1 (originator's
+        // first emission) gets converted; HEADER_2 (already relayed
+        // by another node) gets the prior forwarder's id replaced by
+        // ours. Without this conversion, 2-hop peers learn the
+        // originator as "1 hop direct" via us but can't actually
+        // reach it directly — a routing bug that breaks DATA send.
+        const Bytes& our_id = _local.identity_hash();
+        Packet to_forward = (packet.header_type() == Packet::HeaderType::HEADER_1)
+            ? packet.originator_to_header_2(our_id)
+            : packet.replace_transport_id(our_id);
+
         AnnounceEntry entry;
         entry.dest_hash        = va.destination_hash;
         entry.inserted_ms      = now_ms;
         entry.retransmit_at_ms = now_ms;  // immediate eligibility; tick drains
         entry.received_from    = received_on;
-        entry.announce_hops    = packet.hops();
-        entry.announce_wire    = packet.wire_bytes();
+        entry.announce_hops    = to_forward.hops();
+        entry.announce_wire    = to_forward.wire_bytes();
         _announce_table.put(std::move(entry));
         _stats.announces_queued++;
     }

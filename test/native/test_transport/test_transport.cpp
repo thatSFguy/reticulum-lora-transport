@@ -361,10 +361,14 @@ void test_leaf_does_not_rebroadcast() {
 // re-emitting on the receiving interface is the whole point of being
 // a relay (peers in different range pockets need it). Loop protection
 // is the §13.4 hashlist + §12.3.2 random_blob replay defence, both
-// run in inbound() before the announce reaches this queue. Hops byte
-// is incremented per §2.4.
+// run in inbound() before the announce reaches this queue. The relay
+// converts HEADER_1 → HEADER_2 with its own identity_hash as
+// transport_id (§12.3 step 1) so receivers learn the route through us.
+// Hops byte is incremented per §2.4.
 void test_relay_rebroadcasts_on_all_interfaces() {
-    Transport t(bob_identity(), /*transport_enabled=*/true);
+    Identity bob = bob_identity();
+    Transport t(Identity::from_private_bytes(Bytes::from_hex(BOB_PRIV_HEX)),
+                /*transport_enabled=*/true);
     StubInterface in_iface, out_iface;
     t.register_interface(&in_iface);
     t.register_interface(&out_iface);
@@ -385,13 +389,29 @@ void test_relay_rebroadcasts_on_all_interfaces() {
     TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
     TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
 
-    // §2.4 — hops byte incremented on the wire we just emitted.
+    // §12.3 — the rebroadcast wire is HEADER_2 with bob's identity_hash
+    // as transport_id, NOT a copy of the inbound HEADER_1 wire.
+    Packet emitted = Packet::from_wire_bytes(out_iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_TRUE(emitted.transport_type() == Packet::TransportType::TRANSPORT);
+    TEST_ASSERT_EQUAL_STRING(bob.identity_hash().to_hex().c_str(),
+                             emitted.transport_id().to_hex().c_str());
+
+    // §2.4 — hops byte preserves the bump applied on inbound.
     TEST_ASSERT_EQUAL_UINT8(orig_hops + 1, out_iface.emitted[0][1]);
-    // Body untouched: everything from offset 19 onwards is identical.
-    TEST_ASSERT_EQUAL_UINT(wire.size(), out_iface.emitted[0].size());
-    for (size_t i = 19; i < wire.size(); i++) {
-        TEST_ASSERT_EQUAL_UINT8(wire[i], out_iface.emitted[0][i]);
-    }
+
+    // Wire grew by exactly the 16-byte transport_id (HEADER_2 layout).
+    TEST_ASSERT_EQUAL_UINT(wire.size() + 16, out_iface.emitted[0].size());
+
+    // Body byte-for-byte preserved through the hop. The dest_hash and
+    // context byte slid right by 16 to make room for transport_id, and
+    // the body that follows is identical to the inbound's.
+    Packet inbound = Packet::from_wire_bytes(wire);
+    TEST_ASSERT_EQUAL_STRING(inbound.destination_hash().to_hex().c_str(),
+                             emitted.destination_hash().to_hex().c_str());
+    TEST_ASSERT_EQUAL_UINT8(inbound.context(), emitted.context());
+    TEST_ASSERT_EQUAL_STRING(inbound.data().to_hex().c_str(),
+                             emitted.data().to_hex().c_str());
 }
 
 // §12.3.3 — PATH_RESPONSE announces don't rebroadcast.
@@ -1843,9 +1863,12 @@ void test_path_replacement_more_hops_older_timestamp_kept() {
 // rebroadcast MUST go back out on that same interface — that's how
 // relays extend reach on a broadcast medium. Loop prevention is the
 // §13.4 hashlist + §12.3.2 random_blob defence, both already exercised
-// in the dedup tests above.
+// in the dedup tests above. The emitted wire is HEADER_2 with our
+// own identity_hash inserted as transport_id (§12.3).
 void test_relay_with_single_interface_re_emits() {
-    Transport t(bob_identity(), /*transport_enabled=*/true);
+    Identity bob = bob_identity();
+    Transport t(Identity::from_private_bytes(Bytes::from_hex(BOB_PRIV_HEX)),
+                /*transport_enabled=*/true);
     StubInterface iface;
     t.register_interface(&iface);
 
@@ -1853,7 +1876,12 @@ void test_relay_with_single_interface_re_emits() {
     t.tick(1000);
 
     TEST_ASSERT_EQUAL_UINT(1, t.stats().announces_rebroadcast);
-    TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());  // re-emit on the receiving interface
+    TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());
+
+    Packet emitted = Packet::from_wire_bytes(iface.emitted[0]);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_STRING(bob.identity_hash().to_hex().c_str(),
+                             emitted.transport_id().to_hex().c_str());
 }
 
 int main(int argc, char** argv) {

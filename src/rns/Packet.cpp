@@ -77,15 +77,22 @@ Packet Packet::originator_to_header_2(const Bytes& transport_id) const {
     if (transport_id.size() != TRANSPORT_ID_LEN) {
         throw std::invalid_argument("originator_to_header_2: transport_id must be 16 bytes");
     }
-    // §2.3 transformation:
+    // §2.3 transformation for a relay forwarding an originator's
+    // announce per §12.3:
     //   bits 7-6 → HEADER_2
+    //   bit 5    → preserved (context_flag — for ANNOUNCE this is
+    //              the "ratchet present" bit and MUST survive the
+    //              hop, otherwise the receiver mis-parses the body
+    //              and signature verification fails)
     //   bit 4    → TRANSPORT
-    //   bit 5    → cleared (context_flag dropped)
     //   bits 3-0 → preserved (destination_type, packet_type)
-    constexpr uint8_t HEADER_2_BITS   = static_cast<uint8_t>(HeaderType::HEADER_2) << 6;
-    constexpr uint8_t TRANSPORT_BIT   = static_cast<uint8_t>(TransportType::TRANSPORT) << 4;
-    constexpr uint8_t LOW_NIBBLE_MASK = 0x0F;
-    const uint8_t new_flags = HEADER_2_BITS | TRANSPORT_BIT | (_flags & LOW_NIBBLE_MASK);
+    constexpr uint8_t HEADER_2_BITS    = static_cast<uint8_t>(HeaderType::HEADER_2) << 6;
+    constexpr uint8_t TRANSPORT_BIT    = static_cast<uint8_t>(TransportType::TRANSPORT) << 4;
+    constexpr uint8_t CONTEXT_FLAG_BIT = 0x20;
+    constexpr uint8_t LOW_NIBBLE_MASK  = 0x0F;
+    const uint8_t new_flags = HEADER_2_BITS | TRANSPORT_BIT
+                            | (_flags & CONTEXT_FLAG_BIT)
+                            | (_flags & LOW_NIBBLE_MASK);
 
     Bytes new_raw = pack_header_2(new_flags, _hops, transport_id,
                                   _dest_hash, _context, _data);
