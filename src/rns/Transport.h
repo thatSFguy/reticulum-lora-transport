@@ -28,6 +28,7 @@
 #include "rns/tables/AnnounceTable.h"
 #include "rns/tables/PacketHashList.h"
 #include "rns/tables/PathTable.h"
+#include "rns/tables/ReverseTable.h"
 
 namespace rns {
 
@@ -81,6 +82,7 @@ public:
     const PathTable&      path_table()         const { return _paths; }
     const PacketHashList& hashlist()           const { return _hashlist; }
     const AnnounceTable&  announce_table()     const { return _announce_table; }
+    const ReverseTable&   reverse_table()      const { return _reverse_table; }
     size_t                known_count()        const { return _known_destinations.size(); }
 
     // §4.5 step 6.1 — `Identity.recall(dest_hash)` analogue. Returns
@@ -105,6 +107,10 @@ public:
         uint64_t data_forwarded_header_2 = 0; // §12.2.1 emits
         uint64_t data_forwarded_header_1 = 0; // §12.2.2 emits
         uint64_t data_local_arrived     = 0;  // §12.2.3 local hand-off (deferred)
+        uint64_t proof_inbound          = 0;  // PROOF packets entering reverse dispatch
+        uint64_t proof_forwarded        = 0;  // §12.5.3 PROOF emits
+        uint64_t proof_orphaned         = 0;  // PROOF whose dest_hash isn't in reverse_table
+        uint64_t proof_wrong_interface  = 0;  // PROOF arrived on the wrong outbound_if
     };
     const Stats& stats() const { return _stats; }
 
@@ -114,6 +120,7 @@ private:
     PathTable       _paths;
     PacketHashList  _hashlist;
     AnnounceTable   _announce_table;
+    ReverseTable    _reverse_table;
     std::unordered_map<std::string, Bytes> _known_destinations;  // dest_hash → 64B pub
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
@@ -128,6 +135,13 @@ private:
     //   == 0 → §12.2.3 local destination (deferred)
     void handle_data_forward(Interface* received_on, const Packet& packet,
                              uint64_t now_ms);
+
+    // §12.5.3 — PROOF receipt forwarding via reverse_table. Pops the
+    // entry keyed by packet.destination_hash() (= truncated hash of
+    // the original DATA packet, populated when we forwarded it),
+    // verifies the PROOF arrived on the matching outbound_if, and
+    // re-emits on received_if.
+    void handle_proof_forward(Interface* received_on, const Packet& packet);
 
     // §4.5 step 6.1 — record a freshly-validated announce's pubkey,
     // and update the path entry (timestamp / hops / next_hop /

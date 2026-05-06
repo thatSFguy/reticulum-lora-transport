@@ -20,6 +20,7 @@
 #include <cstdint>
 
 #include "rns/Bytes.h"
+#include "rns/Crypto.h"
 #include "rns/Identity.h"
 #include "rns/Interface.h"
 #include "rns/Packet.h"
@@ -97,6 +98,28 @@ Bytes alice_announce_header_2(const Bytes& transport_id, uint8_t hops) {
     Bytes wire = h2.wire_bytes();
     wire[1] = hops;
     return wire;
+}
+
+// Construct the truncated-hash key the relay uses for reverse_table
+// entries — must match Transport::dedup_hash()[:16] computed over the
+// post-bump form of the DATA packet that the relay observed.
+Bytes reverse_key_for(const Bytes& data_wire_post_bump) {
+    Packet p = Packet::from_wire_bytes(data_wire_post_bump);
+    Bytes material;
+    material.append(p.flags());
+    material.append(p.destination_hash());
+    material.append(p.context());
+    material.append(p.data());
+    return rns::crypto::sha256(material).slice(0, 16);
+}
+
+// Synthesize a PROOF packet whose dest_hash is the truncated hash of
+// a previously-forwarded DATA. body is opaque (relay doesn't sig-check).
+Bytes synth_proof_packet(const Bytes& truncated_hash, const Bytes& body,
+                         uint8_t hops = 0) {
+    // flags: HEADER_1 (00) | BROADCAST (0) | SINGLE (00) | PROOF (11) = 0x03
+    return Packet::pack_header_1(/*flags=*/0x03, hops, truncated_hash,
+                                 Packet::CONTEXT_NONE, body);
 }
 
 } // namespace
@@ -511,6 +534,190 @@ void test_data_header_1_does_not_forward() {
     TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
 }
 
+// §12.2.5 — DATA forward writes a reverse_table entry whose key is
+// the truncated hash of the forwarded packet, with received_if /
+// outbound_if set correctly.
+void test_data_forward_writes_reverse_table_entry() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // alice's announce on out_iface → path[alice].hops=1.
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+
+    Bytes body = Bytes::from_hex("aabbccdd");
+    Bytes data_wire = synth_data_packet(t.local_identity().identity_hash(),
+                                        alice_dest, body, /*hops=*/0);
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    TEST_ASSERT_TRUE(t.reverse_table().empty());
+
+    t.inbound(&in_iface, data_wire, /*now_ms=*/2000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.reverse_table().size());
+
+    // Recompute the key the relay would have used. data_wire's hops
+    // byte is bumped to 1 inside inbound(), so the hash is over the
+    // bumped wire's flags/dest/context/body.
+    Bytes data_wire_post_bump = data_wire;
+    data_wire_post_bump[1] = 0x01;
+    Bytes expected_key = reverse_key_for(data_wire_post_bump);
+
+    const auto* entry = t.reverse_table().get(expected_key);
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_PTR(&in_iface,  entry->received_if);
+    TEST_ASSERT_EQUAL_PTR(&out_iface, entry->outbound_if);
+    TEST_ASSERT_EQUAL_UINT(2000, entry->timestamp_ms);
+}
+
+// §12.5.3 — PROOF arrives whose dest_hash matches a reverse_table
+// entry. Relay forwards on the entry's received_if (back toward the
+// originator) and pops the entry (one-shot routing).
+void test_proof_forward_uses_reverse_table_entry() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    // Seed: announce, then DATA forward through us creates the entry.
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes body       = Bytes::from_hex("11223344");
+    Bytes data_wire  = synth_data_packet(t.local_identity().identity_hash(),
+                                         alice_dest, body, 0);
+    t.inbound(&in_iface, data_wire, 2000);
+    TEST_ASSERT_EQUAL_UINT(1, t.reverse_table().size());
+
+    // Compute the same truncated-hash key.
+    Bytes data_wire_post_bump = data_wire;
+    data_wire_post_bump[1] = 0x01;
+    Bytes proof_dest = reverse_key_for(data_wire_post_bump);
+
+    Bytes proof_body = Bytes::from_hex("c0ffee");
+    Bytes proof_wire = synth_proof_packet(proof_dest, proof_body);
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+
+    // PROOF arrives on out_iface (the direction we forwarded DATA).
+    t.inbound(&out_iface, proof_wire, 2500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_inbound);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_forwarded);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().proof_orphaned);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().proof_wrong_interface);
+
+    // Forwarded back on in_iface (the direction DATA originally came in).
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+
+    // hops bumped on inbound (was 0 → 1).
+    TEST_ASSERT_EQUAL_UINT8(0x01, in_iface.emitted[0][1]);
+
+    // Entry was popped — a SECOND PROOF for the same dest_hash is
+    // orphaned. Use a different body so the wire passes §13.4 dedup
+    // (identical wires would be silently dropped before reaching
+    // handle_proof_forward).
+    TEST_ASSERT_TRUE(t.reverse_table().empty());
+    in_iface.emitted.clear();
+    Bytes proof_wire2 = synth_proof_packet(proof_dest, Bytes::from_hex("d00d"));
+    t.inbound(&out_iface, proof_wire2, 2600);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_orphaned);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+}
+
+// PROOF whose dest_hash isn't in the reverse_table is dropped.
+void test_proof_orphaned_when_no_reverse_entry() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes proof_wire = synth_proof_packet(
+        Bytes::from_hex("00000000000000000000000000000000"),
+        Bytes::from_hex("aa"));
+    t.inbound(&iface, proof_wire, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_inbound);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_orphaned);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().proof_forwarded);
+    TEST_ASSERT_EQUAL_UINT(0, iface.emitted.size());
+}
+
+// PROOF arriving on the wrong interface (not the outbound_if from
+// the reverse_table entry) is dropped per §12.5.3 anti-spoof check.
+void test_proof_dropped_when_arriving_on_wrong_interface() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface, third_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    t.register_interface(&third_iface);
+
+    // Seed: DATA forward via in_iface → out_iface.
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes data_wire  = synth_data_packet(t.local_identity().identity_hash(),
+                                         alice_dest, Bytes::from_hex("01"), 0);
+    t.inbound(&in_iface, data_wire, 2000);
+
+    Bytes data_post = data_wire;
+    data_post[1] = 1;
+    Bytes proof_dest = reverse_key_for(data_post);
+    Bytes proof_wire = synth_proof_packet(proof_dest, Bytes::from_hex("ff"));
+
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    third_iface.emitted.clear();
+
+    // PROOF arrives on third_iface — wrong direction, drop. Entry
+    // stays in the table (we don't pop on a failed validation).
+    t.inbound(&third_iface, proof_wire, 2500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_inbound);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_wrong_interface);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().proof_forwarded);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, third_iface.emitted.size());
+
+    // Reverse-table entry stays — the legitimate PROOF arriving on
+    // out_iface should still be deliverable. Use a different body so
+    // it passes §13.4 dedup (the spoof and the real PROOF can't share
+    // a wire — different dedup hashes).
+    TEST_ASSERT_EQUAL_UINT(1, t.reverse_table().size());
+    Bytes legit_proof = synth_proof_packet(proof_dest, Bytes::from_hex("ee"));
+    t.inbound(&out_iface, legit_proof, 2600);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().proof_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, in_iface.emitted.size());
+    TEST_ASSERT_TRUE(t.reverse_table().empty());
+}
+
+// §12.5.3 — tick() evicts reverse_table entries older than
+// REVERSE_TIMEOUT_MS (30s default).
+void test_reverse_table_aging() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+
+    t.inbound(&out_iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    Bytes alice_dest = Bytes::from_hex(ALICE_DEST_HASH);
+    Bytes data_wire  = synth_data_packet(t.local_identity().identity_hash(),
+                                         alice_dest, Bytes::from_hex("ee"), 0);
+    t.inbound(&in_iface, data_wire, /*now_ms=*/10'000);
+    TEST_ASSERT_EQUAL_UINT(1, t.reverse_table().size());
+
+    // Just inside timeout — entry stays.
+    t.tick(10'000 + rns::ReverseTable::REVERSE_TIMEOUT_MS - 1);
+    TEST_ASSERT_EQUAL_UINT(1, t.reverse_table().size());
+
+    // Past timeout — evicted.
+    t.tick(10'000 + rns::ReverseTable::REVERSE_TIMEOUT_MS + 1);
+    TEST_ASSERT_EQUAL_UINT(0, t.reverse_table().size());
+}
+
 // Single-interface relay node. Receives an announce on its only
 // interface. Rebroadcast must NOT echo back — emitted stays at 0.
 void test_relay_with_single_interface_does_not_echo() {
@@ -545,6 +752,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_data_not_for_us_is_ignored);
     RUN_TEST(test_data_for_unknown_dest_is_ignored);
     RUN_TEST(test_data_header_1_does_not_forward);
+    RUN_TEST(test_data_forward_writes_reverse_table_entry);
+    RUN_TEST(test_proof_forward_uses_reverse_table_entry);
+    RUN_TEST(test_proof_orphaned_when_no_reverse_entry);
+    RUN_TEST(test_proof_dropped_when_arriving_on_wrong_interface);
+    RUN_TEST(test_reverse_table_aging);
     RUN_TEST(test_relay_with_single_interface_does_not_echo);
     return UNITY_END();
 }

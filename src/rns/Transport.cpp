@@ -48,6 +48,7 @@ void Transport::tick(uint64_t now_ms) {
     drive_announce_rebroadcast(now_ms);
     for (Interface* i : _interfaces) i->tick(now_ms);
     _paths.evict_expired(now_ms);
+    _reverse_table.evict_aged(now_ms);
     _hashlist.purge_if_over_cap();
 }
 
@@ -102,6 +103,8 @@ void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_
     } else if (packet.packet_type() == Packet::PacketType::DATA &&
                packet.destination_type() != Packet::DestinationType::LINK) {
         handle_data_forward(received_on, packet, now_ms);
+    } else if (packet.packet_type() == Packet::PacketType::PROOF) {
+        handle_proof_forward(received_on, packet);
     }
 }
 
@@ -169,9 +172,6 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
 
 void Transport::handle_data_forward(Interface* received_on, const Packet& packet,
                                     uint64_t now_ms) {
-    (void)received_on;
-    (void)now_ms;
-
     _stats.data_inbound++;
 
     // §12.2 entry: HEADER_2 packet whose transport_id is us, AND we
@@ -184,6 +184,7 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
     if (!path->receiving_interface)     return;
 
     const uint8_t remaining = path->hops;
+    Interface* outbound_if = nullptr;
 
     if (remaining > 1) {
         // §12.2.1 — replace transport_id with path.next_hop, keep
@@ -194,6 +195,7 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
         if (path->next_hop.size() != Packet::TRANSPORT_ID_LEN) return;
         Packet forwarded = packet.replace_transport_id(path->next_hop);
         path->receiving_interface->transmit_now(forwarded.wire_bytes());
+        outbound_if = path->receiving_interface;
         _stats.data_forwarded_header_2++;
     } else if (remaining == 1) {
         // §12.2.2 — strip transport_id, broadcast as HEADER_1. Last
@@ -201,13 +203,60 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
         // broadcast directly.
         Packet forwarded = packet.strip_transport_id_to_header_1();
         path->receiving_interface->transmit_now(forwarded.wire_bytes());
+        outbound_if = path->receiving_interface;
         _stats.data_forwarded_header_1++;
     } else {
         // §12.2.3 — local destination. Hand-off to local Destination
         // dispatch lands when local destinations are registered on
-        // Transport. For now we just count it.
+        // Transport. No reverse_table entry here — PROOF for a local
+        // destination would be locally generated, not forwarded.
         _stats.data_local_arrived++;
+        return;
     }
+
+    // §12.2.5 — record where to send the eventual PROOF receipt.
+    // Keyed by truncated SHA-256 of the packet's hashable part —
+    // §6.5 says the PROOF will arrive with that value as its
+    // dest_hash. The originator-emitted DATA's hashable part
+    // matches what we forwarded (we changed only the transport_id /
+    // header form / hops, none of which are in the hashable bytes).
+    ReverseEntry entry;
+    entry.packet_hash  = dedup_hash(packet).slice(0, 16);
+    entry.received_if  = received_on;
+    entry.outbound_if  = outbound_if;
+    entry.timestamp_ms = now_ms;
+    _reverse_table.put(std::move(entry));
+}
+
+void Transport::handle_proof_forward(Interface* received_on, const Packet& packet) {
+    _stats.proof_inbound++;
+
+    // Peek first — only pop on a successful match. A PROOF arriving on
+    // the wrong interface might be a spoof; the legitimate PROOF could
+    // still arrive on the correct outbound_if before the entry ages
+    // out. Popping on the spoof would drop the legitimate one.
+    const ReverseEntry* entry = _reverse_table.get(packet.destination_hash());
+    if (!entry) {
+        _stats.proof_orphaned++;
+        return;
+    }
+    if (entry->outbound_if != received_on) {
+        _stats.proof_wrong_interface++;
+        return;
+    }
+    if (!entry->received_if) {
+        // Defensive — shouldn't happen because handle_data_forward
+        // only writes entries with both interfaces set. Pop to clear.
+        _reverse_table.pop(packet.destination_hash());
+        return;
+    }
+
+    Interface* fwd = entry->received_if;
+    _reverse_table.pop(packet.destination_hash());  // consume on success
+    // hops byte was already incremented at inbound() entry; emit the
+    // packet wire as-is (matches §12.5.3's "flags + new_hops + rest").
+    fwd->transmit_now(packet.wire_bytes());
+    _stats.proof_forwarded++;
 }
 
 bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
