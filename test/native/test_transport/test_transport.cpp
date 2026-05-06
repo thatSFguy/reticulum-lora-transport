@@ -864,7 +864,11 @@ void test_path_request_dedup_by_target_and_tag() {
     t.inbound(&iface, pr1, 2000);
     t.inbound(&iface, pr2, 2001);
 
-    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_received);
+    // Both packets pass §13.4 dedup (different bodies — different
+    // transport_id slots). path_requests_received counts every
+    // parse-valid request, and the second one then drops at the
+    // §7.2.2 (target||tag) ring — that's what _deduped reports.
+    TEST_ASSERT_EQUAL_UINT(2, t.stats().path_requests_received);
     TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_deduped);
     TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_answered);
     TEST_ASSERT_EQUAL_UINT(1, iface.emitted.size());
