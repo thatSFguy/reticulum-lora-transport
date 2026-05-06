@@ -103,6 +103,18 @@ const Bytes* Transport::public_key_for(const Bytes& dest_hash) const {
     return (it == _known_destinations.end()) ? nullptr : &it->second;
 }
 
+void Transport::blackhole_identity(const Bytes& identity_hash) {
+    _blackholed.insert(key_of(identity_hash));
+}
+
+bool Transport::unblackhole_identity(const Bytes& identity_hash) {
+    return _blackholed.erase(key_of(identity_hash)) != 0;
+}
+
+bool Transport::is_blackholed(const Bytes& identity_hash) const {
+    return _blackholed.count(key_of(identity_hash)) != 0;
+}
+
 std::string Transport::key_of(const Bytes& b) { return b.to_hex(); }
 
 Bytes Transport::dedup_hash(const Packet& p) {
@@ -217,6 +229,14 @@ void Transport::handle_announce(Interface* received_on, const Packet& packet,
         crypto::sha256(va.public_key).slice(0, Identity::IDENTITY_HASH_LEN);
     if (announcer_id_hash == _local.identity_hash()) {
         _stats.self_announce_drops++;
+        return;
+    }
+
+    // §4.5 step 5 — operator-controlled blackhole. Drop announces
+    // from any identity_hash on the operator's blackhole list,
+    // regardless of cryptographic validity.
+    if (is_blackholed(announcer_id_hash)) {
+        _stats.blackhole_drops++;
         return;
     }
 

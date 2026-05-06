@@ -21,6 +21,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rns/Bytes.h"
@@ -174,6 +175,15 @@ public:
     // if we've never seen a valid announce for it.
     const Bytes* public_key_for(const Bytes& dest_hash) const;
 
+    // §4.5 step 5 — operator-controlled blackhole list keyed by
+    // identity_hash (16 bytes). Announces from any identity_hash on
+    // this list are dropped silently regardless of signature
+    // validity. Use to suppress known-misbehaving peers without
+    // changing the wire protocol.
+    void blackhole_identity(const Bytes& identity_hash);
+    bool unblackhole_identity(const Bytes& identity_hash);
+    bool is_blackholed(const Bytes& identity_hash) const;
+
     // Stat counters for tests / monitoring. None of these are wire
     // semantics — purely diagnostic.
     struct Stats {
@@ -214,6 +224,7 @@ public:
         uint64_t path_requests_local_no_seed  = 0; // §7.2 branch 1 dropped (no seed fn)
         uint64_t scheduled_announces_emitted  = 0; // schedule_announce-driven emits
         uint64_t path_replacement_rejected    = 0; // §4.5 step 6.3 — kept stale-but-fresher cached entry
+        uint64_t blackhole_drops              = 0; // §4.5 step 5 — announce from blackholed identity
     };
     const Stats& stats() const { return _stats; }
 
@@ -233,6 +244,7 @@ private:
     PacketHashList  _pr_tags{MAX_PR_TAGS};
     std::unordered_map<std::string, Bytes>      _known_destinations;  // dest_hash → 64B pub
     std::unordered_map<std::string, Destination> _local_destinations;  // dest_hash hex → Destination
+    std::unordered_set<std::string>             _blackholed;           // identity_hash hex set
     std::vector<Interface*>      _interfaces;
     std::vector<AnnounceHandler> _announce_handlers;
     AnnounceSeedFn _announce_seed_fn;

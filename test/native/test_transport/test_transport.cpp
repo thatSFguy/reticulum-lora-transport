@@ -997,6 +997,44 @@ void test_link_request_forward_last_hop() {
     TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH, entry->dst_hash.to_hex().c_str());
 }
 
+// §4.5 step 5 — blackhole list silently drops announces from a
+// specific identity_hash, regardless of cryptographic validity.
+void test_blackhole_drops_announce_from_blocked_identity() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    // Alice's identity_hash from identities.json.
+    Bytes alice_id_hash = Bytes::from_hex("28d43a11abc1094301a59ed3b44f127b");
+    t.blackhole_identity(alice_id_hash);
+    TEST_ASSERT_TRUE(t.is_blackholed(alice_id_hash));
+
+    Bytes wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    t.inbound(&iface, wire, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().blackhole_drops);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().announce_validated);
+    TEST_ASSERT_EQUAL_UINT(0, t.known_count());
+    TEST_ASSERT_NULL(t.path_table().get(Bytes::from_hex(ALICE_DEST_HASH)));
+}
+
+// Unblacklisting restores normal processing.
+void test_unblackhole_restores_processing() {
+    Transport t(bob_identity(), false);
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes alice_id_hash = Bytes::from_hex("28d43a11abc1094301a59ed3b44f127b");
+    t.blackhole_identity(alice_id_hash);
+    TEST_ASSERT_TRUE(t.unblackhole_identity(alice_id_hash));
+    TEST_ASSERT_FALSE(t.is_blackholed(alice_id_hash));
+    TEST_ASSERT_FALSE(t.unblackhole_identity(alice_id_hash));  // already removed
+
+    t.inbound(&iface, Bytes::from_hex(ALICE_NO_RATCHET_WIRE), 1000);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().blackhole_drops);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().announce_validated);
+}
+
 // §7.2.3 branch 4 — transport-enabled, no path known: forward the
 // path-request to every other interface. Body is re-emitted as-is.
 void test_path_request_branch_4_forwards_to_other_interfaces() {
@@ -1841,6 +1879,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_path_request_dedup_by_target_and_tag);
     RUN_TEST(test_path_request_transport_mode_payload_parses);
     RUN_TEST(test_link_request_forward_last_hop);
+    RUN_TEST(test_blackhole_drops_announce_from_blocked_identity);
+    RUN_TEST(test_unblackhole_restores_processing);
     RUN_TEST(test_path_request_branch_4_forwards_to_other_interfaces);
     RUN_TEST(test_path_request_branch_4_single_iface_falls_to_unanswered);
     RUN_TEST(test_link_request_signalling_mtu_clamped_to_outbound_iface);
