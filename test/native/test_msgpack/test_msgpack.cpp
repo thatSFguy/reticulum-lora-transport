@@ -58,11 +58,19 @@ void test_msgpack_array_header_fixarray() {
     TEST_ASSERT_EQUAL_STRING("95", w.bytes().to_hex().c_str());
 }
 
-void test_msgpack_array_header_rejects_large() {
-    Writer w;
+// fixarray boundary: 15 elements stays fixarray, 16 promotes to array16.
+// Both produce valid output; only > 65535 throws now.
+void test_msgpack_array_header_promotes_to_array16() {
+    Writer w15; w15.array_header(15);
+    TEST_ASSERT_EQUAL_STRING("9f", w15.bytes().to_hex().c_str());
+
+    Writer w16; w16.array_header(16);
+    TEST_ASSERT_EQUAL_STRING("dc0010", w16.bytes().to_hex().c_str());
+
+    Writer w_too_big;
     try {
-        w.array_header(16);
-        TEST_FAIL_MESSAGE("expected throw — fixarray cap is 15");
+        w_too_big.array_header(65536);
+        TEST_FAIL_MESSAGE("expected throw — array32 unsupported");
     } catch (const std::invalid_argument&) {
         // expected
     }
@@ -301,7 +309,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_msgpack_uint32_be);
     RUN_TEST(test_msgpack_float32_one_point_zero);
     RUN_TEST(test_msgpack_array_header_fixarray);
-    RUN_TEST(test_msgpack_array_header_rejects_large);
+    RUN_TEST(test_msgpack_array_header_promotes_to_array16);
     RUN_TEST(test_msgpack_full_payload_assembly);
     RUN_TEST(test_telemetry_encode_with_position);
     RUN_TEST(test_telemetry_encode_without_position);
