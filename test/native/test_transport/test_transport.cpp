@@ -997,6 +997,54 @@ void test_link_request_forward_last_hop() {
     TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH, entry->dst_hash.to_hex().c_str());
 }
 
+// §7.2.3 branch 4 — transport-enabled, no path known: forward the
+// path-request to every other interface. Body is re-emitted as-is.
+void test_path_request_branch_4_forwards_to_other_interfaces() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_a, out_b;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_a);
+    t.register_interface(&out_b);
+
+    Bytes unknown_target =
+        Bytes::from_hex("0123456789abcdef0123456789abcdef");
+    Bytes tag = Bytes::from_hex("99999999999999999999999999999999");
+    Bytes pr  = synth_path_request(unknown_target, tag);
+
+    in_iface.emitted.clear();
+    out_a.emitted.clear();
+    out_b.emitted.clear();
+
+    t.inbound(&in_iface, pr, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_forwarded);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_unanswered);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_answered);
+
+    // Forwarded on out_a + out_b, NOT echoed back on in_iface.
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, out_a.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(1, out_b.emitted.size());
+}
+
+// Branch 4 with only one interface — nowhere to forward to. Falls
+// through to branch 5 (unanswered) instead of incrementing the
+// forwarded counter.
+void test_path_request_branch_4_single_iface_falls_to_unanswered() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface only_iface;
+    t.register_interface(&only_iface);
+
+    Bytes pr = synth_path_request(
+        Bytes::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        Bytes::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    t.inbound(&only_iface, pr, 1000);
+
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().path_requests_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().path_requests_unanswered);
+    TEST_ASSERT_EQUAL_UINT(0, only_iface.emitted.size());
+}
+
 // §6.6 / §12.2.4 — when the outbound interface's hw_mtu is smaller
 // than the LINKREQUEST's signalled MTU, the relay rewrites the
 // signalling in place. Mode bits preserved; only the 21-bit MTU
@@ -1744,6 +1792,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_path_request_dedup_by_target_and_tag);
     RUN_TEST(test_path_request_transport_mode_payload_parses);
     RUN_TEST(test_link_request_forward_last_hop);
+    RUN_TEST(test_path_request_branch_4_forwards_to_other_interfaces);
+    RUN_TEST(test_path_request_branch_4_single_iface_falls_to_unanswered);
     RUN_TEST(test_link_request_signalling_mtu_clamped_to_outbound_iface);
     RUN_TEST(test_link_request_signalling_not_clamped_when_iface_larger);
     RUN_TEST(test_link_request_forward_multi_hop);

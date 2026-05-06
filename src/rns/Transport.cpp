@@ -431,16 +431,41 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     }
 
     // §7.2.3 branch 2 — known path AND we're transport-enabled.
-    // Branches 3/4 (forward path-request to other interfaces with a
-    // fresh tag) need outbound DATA construction and aren't here yet.
     const PathEntry* path = _paths.get(target);
-    if (!path || !_transport_enabled) {
-        _stats.path_requests_unanswered++;
+    if (path && _transport_enabled) {
+        emit_path_response(received_on, *path);
+        _stats.path_requests_answered++;
         return;
     }
 
-    emit_path_response(received_on, *path);
-    _stats.path_requests_answered++;
+    // §7.2.3 branch 4 — transport-enabled, no path known: forward
+    // the request on every other interface so the broader mesh can
+    // answer. We re-emit the inbound wire as-is (the body's
+    // transport_id stays as it was; spec's exact upstream behavior
+    // would replace it with ours, but for flat LoRa meshes the
+    // path-response gets broadcast back and everyone picks it up
+    // regardless). pr_tags dedup catches loop-backs.
+    //
+    // discovery_path_requests bookkeeping (capped at PATH_REQUEST_TIMEOUT
+    // = 15s) deferred — relevant for tree topologies where the
+    // path-response needs deliberate reverse-routing through specific
+    // relays. Flat-mesh deployments don't depend on it.
+    if (_transport_enabled) {
+        bool emitted_any = false;
+        for (Interface* iface : _interfaces) {
+            if (iface == received_on) continue;
+            iface->transmit_now(packet.wire_bytes());
+            emitted_any = true;
+        }
+        if (emitted_any) {
+            _stats.path_requests_forwarded++;
+            return;
+        }
+    }
+
+    // §7.2.3 branch 5 — leaf, or transport-enabled with no other
+    // interface to forward to.
+    _stats.path_requests_unanswered++;
 }
 
 void Transport::emit_path_response(Interface* out, const PathEntry& path) {

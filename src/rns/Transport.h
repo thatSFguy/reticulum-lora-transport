@@ -194,6 +194,7 @@ public:
         uint64_t path_requests_tagless    = 0;  // §7.2.1 — dropped, no tag bytes
         uint64_t path_requests_deduped    = 0;  // §7.2.2 — (target||tag) seen before
         uint64_t path_requests_answered   = 0;  // §7.2.3 branch 2 emit
+        uint64_t path_requests_forwarded  = 0;  // §7.2.3 branch 4 — relayed to other interfaces
         uint64_t path_requests_unanswered = 0;  // unknown target / leaf with no local match
         uint64_t link_requests_forwarded  = 0;  // §12.2.4 link_table written
         uint64_t link_proofs_forwarded    = 0;  // §12.5.1 LRPROOF validated + forwarded
