@@ -19,6 +19,7 @@
 
 #include <unity.h>
 #include <cstdint>
+#include <stdexcept>
 
 #include "rns/Bytes.h"
 #include "rns/Crypto.h"
