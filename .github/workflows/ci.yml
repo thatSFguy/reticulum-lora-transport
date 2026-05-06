@@ -72,10 +72,13 @@ jobs:
         # Adafruit nRF52 bootloader (which ships on Nice!Nano clones,
         # XIAO nRF52840, RAK4631, Heltec T114, etc.) accepts on the
         # USB mass-storage drag-and-drop interface. uf2conv.py is
-        # Microsoft's canonical converter; it has a built-in Intel
-        # HEX parser so no extra Python deps are needed.
+        # Microsoft's canonical converter; recent versions read the
+        # family table from a sibling uf2families.json, so we fetch
+        # both. The script has a built-in Intel HEX parser so no
+        # extra Python deps are needed.
         run: |
-          curl -fsSL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o uf2conv.py
+          curl -fsSL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py    -o uf2conv.py
+          curl -fsSL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o uf2families.json
           python uf2conv.py -c -f 0xADA52840 -o firmware-ProMicroDIY.uf2 .pio/build/ProMicroDIY/firmware.hex
 
       - name: Upload UF2 as workflow artifact
