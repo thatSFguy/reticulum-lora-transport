@@ -32,9 +32,6 @@ void tearDown() {}
 namespace {
 
 // Identities: alice = initiator, bob = responder. From identities.json.
-constexpr const char* ALICE_PRIV_HEX =
-    "587e730a70d24e971efa8c146e554996d70bff45b2033d336e2c078dc63d3645"
-    "bef79d95bf6b253827a2e7e81a13ab0b10a908fd158581d1827095b788169e93";
 constexpr const char* BOB_PRIV_HEX =
     "0f453e75d564532f2fa671aea79e9a714e4564e1ff833d1df19986fe8a36aa21"
     "9a6acdad966af7d006cfd393ca8278c608978bcaefa5b5f24db867179f83a863";
@@ -64,9 +61,10 @@ constexpr const char* EXPECTED_DERIVED_KEY_HEX =
 // mode=0x01 (AES256_CBC), mtu=500=0x0001f4 → 0x20 0x01 0xf4.
 constexpr const char* EXPECTED_SIGNALLING_HEX = "2001f4";
 
-rns::Identity alice_identity() {
-    return rns::Identity::from_private_bytes(Bytes::from_hex(ALICE_PRIV_HEX));
-}
+// alice_identity() exists in the vector inputs but isn't used by any
+// of these tests — the vector's expected outputs only need bob's
+// (responder's) keys. Kept as a comment for traceability.
+//   rns::Identity::from_private_bytes(Bytes::from_hex(ALICE_PRIV_HEX))
 rns::Identity bob_identity() {
     return rns::Identity::from_private_bytes(Bytes::from_hex(BOB_PRIV_HEX));
 }

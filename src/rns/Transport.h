@@ -203,6 +203,7 @@ public:
         uint64_t link_data_forwarded      = 0;  // §12.5.2 emits
         uint64_t link_data_unknown_link   = 0;  // dest_hash not in link_table
         uint64_t link_data_unvalidated    = 0;  // link not yet established
+        uint64_t link_close_observed      = 0;  // §6.7.3 LINKCLOSE forwarded + cleaned up
         uint64_t path_requests_local_answered = 0; // §7.2 branch 1 — local dest match
         uint64_t path_requests_local_no_seed  = 0; // §7.2 branch 1 dropped (no seed fn)
         uint64_t scheduled_announces_emitted  = 0; // schedule_announce-driven emits

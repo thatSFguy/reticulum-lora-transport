@@ -568,6 +568,16 @@ void Transport::handle_link_data_forward(Interface* received_on,
 
     fwd->transmit_now(packet.wire_bytes());
     _stats.link_data_forwarded++;
+
+    // §6.7.3 — LINKCLOSE tears down the link. The relay can't read
+    // the encrypted body but it can see the context byte. After
+    // forwarding the close, drop the link_table entry so subsequent
+    // Link DATA on this link_id is correctly classified as
+    // "unknown_link" rather than continuing to forward.
+    if (packet.context() == Packet::CONTEXT_LINKCLOSE) {
+        _link_table.remove(packet.destination_hash());
+        _stats.link_close_observed++;
+    }
 }
 
 bool Transport::cache_validated_announce(const ValidatedAnnounce& va,

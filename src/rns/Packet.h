@@ -32,6 +32,8 @@ public:
     // implemented.
     static constexpr uint8_t CONTEXT_NONE          = 0x00;
     static constexpr uint8_t CONTEXT_PATH_RESPONSE = 0x0B;
+    static constexpr uint8_t CONTEXT_KEEPALIVE     = 0xFA;
+    static constexpr uint8_t CONTEXT_LINKCLOSE     = 0xFC;
     static constexpr uint8_t CONTEXT_LRPROOF       = 0xFF;
 
     static constexpr size_t  DEST_HASH_LEN     = 16;

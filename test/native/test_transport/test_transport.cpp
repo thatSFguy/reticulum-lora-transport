@@ -1182,6 +1182,46 @@ void test_link_data_initiator_to_responder() {
     TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
 }
 
+// §6.7.3 — LINKCLOSE arrives on a validated link: forward
+// bidirectionally per §12.5.2, then drop the link_table entry.
+void test_link_close_forwards_and_clears_link_table() {
+    Transport t(bob_identity(), /*transport_enabled=*/true);
+    StubInterface in_iface, out_iface;
+    t.register_interface(&in_iface);
+    t.register_interface(&out_iface);
+    LinkSetup s = setup_link_pending(t, in_iface, out_iface);
+    Bytes lrproof = synth_lrproof(s.link_id, Bytes(32), alice_identity());
+    t.inbound(&out_iface, lrproof, 3000);
+    in_iface.emitted.clear();
+    out_iface.emitted.clear();
+    TEST_ASSERT_EQUAL_UINT(1, t.link_table().size());
+
+    // LINKCLOSE wire — Link DATA with context = 0xFC. Body would be
+    // Token-encrypted link_id; the relay can't decrypt and doesn't
+    // need to. Use arbitrary opaque body bytes for the test.
+    Bytes body = Bytes::from_hex("0011223344556677");
+    Bytes link_close = Packet::pack_header_1(
+        /*flags=*/LINK_DATA_FLAGS, /*hops=*/0, s.link_id,
+        Packet::CONTEXT_LINKCLOSE, body);
+
+    t.inbound(&in_iface, link_close, 3500);
+
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_data_forwarded);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_close_observed);
+    TEST_ASSERT_EQUAL_UINT(1, out_iface.emitted.size());
+
+    // link_table entry was popped — subsequent Link DATA for the
+    // same link_id should be classified as unknown.
+    TEST_ASSERT_EQUAL_UINT(0, t.link_table().size());
+    Bytes followup_data = synth_link_data(s.link_id, Bytes::from_hex("99"));
+    out_iface.emitted.clear();
+    in_iface.emitted.clear();
+    t.inbound(&in_iface, followup_data, 3600);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().link_data_unknown_link);
+    TEST_ASSERT_EQUAL_UINT(0, in_iface.emitted.size());
+    TEST_ASSERT_EQUAL_UINT(0, out_iface.emitted.size());
+}
+
 // §12.5.2 — Link DATA forwarding: responder → initiator direction.
 void test_link_data_responder_to_initiator() {
     Transport t(bob_identity(), /*transport_enabled=*/true);
@@ -1522,6 +1562,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_link_proof_unknown_link);
     RUN_TEST(test_link_data_initiator_to_responder);
     RUN_TEST(test_link_data_responder_to_initiator);
+    RUN_TEST(test_link_close_forwards_and_clears_link_table);
     RUN_TEST(test_link_data_before_validation_is_dropped);
     RUN_TEST(test_link_data_unknown_link);
     RUN_TEST(test_path_request_branch_1_local_destination);
