@@ -97,8 +97,8 @@ void test_msgpack_full_payload_assembly() {
 //   uint32 17                 = 0xce 00000011   (announces_rebroadcast)
 //   uint32 5                  = 0xce 00000005   (data_forwarded)
 //   uint32 100                = 0xce 00000064   (inbound_packets)
-//   fixstr "Rptr-aabbccdd"    = 0xad 52707472 2d61616262 6363646\
-//                                  hex form: ad 5270 7472 2d61 6162 6263 6364 64
+//   fixstr "Rptr-aabbccdd"    = 0xad + 13 ASCII bytes
+//                                  hex form: ad 527074722d6161626263636464
 void test_telemetry_encode_with_position() {
     rns::telemetry::Snapshot s;
     s.have_position          = true;
@@ -232,10 +232,10 @@ void test_reader_int_signed_widths() {
         TEST_ASSERT_TRUE(r.read_int(v));
         TEST_ASSERT_EQUAL_INT64(-1000, v);
     }
-    // int32(-122419400) = d2 f8 d3 8d b8  (msgpack encoding of -122419400 = lon_udeg
+    // int32(-122419400) = d2 f8 b4 07 38  (msgpack encoding of -122419400 = lon_udeg
     // for San Francisco — exactly the case the webclient hits for save-config)
     {
-        Bytes b = Bytes::from_hex("d2f8d38db8");
+        Bytes b = Bytes::from_hex("d2f8b40738");
         Reader r(b); int64_t v = 0;
         TEST_ASSERT_TRUE(r.read_int(v));
         TEST_ASSERT_EQUAL_INT64(-122419400, v);
@@ -259,9 +259,9 @@ void test_reader_int_accepts_uint_encodings() {
         TEST_ASSERT_TRUE(r.read_int(v));
         TEST_ASSERT_EQUAL_INT64(42, v);
     }
-    // uint32(904375000) = ce 35 e2 1d 18 — typical freq_hz value
+    // uint32(904375000) = ce 35 e7 aa d8 — typical freq_hz value
     {
-        Bytes b = Bytes::from_hex("ce35e21d18");
+        Bytes b = Bytes::from_hex("ce35e7aad8");
         Reader r(b); int64_t v = 0;
         TEST_ASSERT_TRUE(r.read_int(v));
         TEST_ASSERT_EQUAL_INT64(904375000, v);
