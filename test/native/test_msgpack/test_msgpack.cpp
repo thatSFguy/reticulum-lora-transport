@@ -88,28 +88,37 @@ void test_msgpack_full_payload_assembly() {
 }
 
 // §telemetry encoder — full snapshot with position.
-//   array(5)   = 0x95
-//   float32 1.0 = 0xca 3f800000
-//   float32 -1.0 = 0xca bf800000
-//   uint16 3700 = 0xcd 0e74
-//   uint16 42   = 0xcd 002a
-//   uint32 1000 = 0xce 000003e8
+//   array(8)                  = 0x98
+//   float32 1.0               = 0xca 3f800000   (lat)
+//   float32 -1.0              = 0xca bf800000   (lon)
+//   uint16 3700               = 0xcd 0e74       (battery_mv)
+//   uint16 42                 = 0xcd 002a       (route_count)
+//   uint32 1000               = 0xce 000003e8   (packets_forwarded — aggregate)
+//   uint32 17                 = 0xce 00000011   (announces_rebroadcast)
+//   uint32 5                  = 0xce 00000005   (data_forwarded)
+//   uint32 100                = 0xce 00000064   (inbound_packets)
 void test_telemetry_encode_with_position() {
     rns::telemetry::Snapshot s;
-    s.have_position    = true;
-    s.lat              =  1.0f;
-    s.lon              = -1.0f;
-    s.battery_mv       = 3700;
-    s.route_count      = 42;
-    s.packets_forwarded = 1000;
+    s.have_position          = true;
+    s.lat                    =  1.0f;
+    s.lon                    = -1.0f;
+    s.battery_mv             = 3700;
+    s.route_count            = 42;
+    s.packets_forwarded      = 1000;
+    s.announces_rebroadcast  = 17;
+    s.data_forwarded         = 5;
+    s.inbound_packets        = 100;
     Bytes out = rns::telemetry::encode(s);
     TEST_ASSERT_EQUAL_STRING(
-        "95"
+        "98"
         "ca3f800000"
         "cabf800000"
         "cd0e74"
         "cd002a"
-        "ce000003e8",
+        "ce000003e8"
+        "ce00000011"
+        "ce00000005"
+        "ce00000064",
         out.to_hex().c_str());
 }
 
@@ -282,20 +291,27 @@ void test_reader_skip_value() {
     TEST_ASSERT_EQUAL_UINT64(0xAA, v);
 }
 
-// Without position: lat/lon are nil.
+// Without position: lat/lon are nil; counters are zero (the wire
+// shape a freshly-booted node emits at its first 2-h beacon).
 void test_telemetry_encode_without_position() {
     rns::telemetry::Snapshot s;
-    s.have_position    = false;
-    s.battery_mv       = 0;
-    s.route_count      = 0;
-    s.packets_forwarded = 0;
+    s.have_position          = false;
+    s.battery_mv             = 0;
+    s.route_count            = 0;
+    s.packets_forwarded      = 0;
+    s.announces_rebroadcast  = 0;
+    s.data_forwarded         = 0;
+    s.inbound_packets        = 0;
     Bytes out = rns::telemetry::encode(s);
     TEST_ASSERT_EQUAL_STRING(
-        "95"
+        "98"
         "c0"
         "c0"
         "cd0000"
         "cd0000"
+        "ce00000000"
+        "ce00000000"
+        "ce00000000"
         "ce00000000",
         out.to_hex().c_str());
 }

@@ -102,24 +102,32 @@ discarded.
 
 ## 4. Telemetry payload (msgpack)
 
-`app_data` of a beacon is a single msgpack **5-element fixarray**
+`app_data` of a beacon is a single msgpack **8-element fixarray**
 with explicit-width numeric tags. The encoder always emits these
 exact tags — no smallest-fits compression — so byte layout is
 deterministic.
 
 ```
-[0] lat              : float32  OR  nil
-[1] lon              : float32  OR  nil
-[2] battery_mv       : uint16
-[3] route_count      : uint16
-[4] packets_forwarded: uint32
+[0] lat                  : float32  OR  nil
+[1] lon                  : float32  OR  nil
+[2] battery_mv           : uint16
+[3] route_count          : uint16
+[4] packets_forwarded    : uint32   (aggregate of all forwarding paths)
+[5] announces_rebroadcast: uint32   (§12.3 announce relays only)
+[6] data_forwarded       : uint32   (DATA forwards across both header forms)
+[7] inbound_packets      : uint32   (every parsed inbound — the denominator)
 ```
+
+Indices 0..4 are stable from v0.1.0. Indices 5..7 were added in
+v0.1.4. Per the forward-compat rule (§7), older decoders that read
+only 5 elements continue to work against newer beacons; newer
+decoders MUST tolerate older beacons that stop at index 4.
 
 ### 4.1 Wire byte layout
 
 | Byte(s) | Hex | Meaning |
 |---|---|---|
-| 0 | `95` | fixarray of length 5 |
+| 0 | `98` | fixarray of length 8 |
 | 1 | `ca` *or* `c0` | float32 tag (lat) **or** nil |
 | 2..5 | 4 bytes BE | lat IEEE-754 float32 (omitted if nil) |
 | next | `ca` *or* `c0` | float32 tag (lon) **or** nil |
@@ -129,7 +137,13 @@ deterministic.
 | next | `cd` | uint16 tag (route_count) |
 | +2 | 2 bytes BE | route count |
 | next | `ce` | uint32 tag (packets_forwarded) |
-| +4 | 4 bytes BE | packets forwarded |
+| +4 | 4 bytes BE | aggregate packets forwarded |
+| next | `ce` | uint32 tag (announces_rebroadcast) |
+| +4 | 4 bytes BE | §12.3 announce relays |
+| next | `ce` | uint32 tag (data_forwarded) |
+| +4 | 4 bytes BE | DATA forwards (both header forms) |
+| next | `ce` | uint32 tag (inbound_packets) |
+| +4 | 4 bytes BE | total parsed inbound packets |
 
 Position-only (no msgpack-rpc map keys), so element order is the
 schema. Do not reorder.
@@ -137,31 +151,39 @@ schema. Do not reorder.
 ### 4.2 Worked example
 
 A node at lat 37.7749° / lon -122.4194° with 3.95 V battery,
-12 known routes, 4231 packets forwarded:
+12 known routes, 4231 total packets forwarded (3900 announce
+rebroadcasts + 331 data forwards), 5023 inbound packets:
 
 ```
-95
+98
 ca 42 17 18 b4         # float32  37.7749
 ca c2 f4 d6 e9         # float32 -122.4194
 cd 0f 6c               # uint16  3948 mV
 cd 00 0c               # uint16  12
-ce 00 00 10 87         # uint32  4231
+ce 00 00 10 87         # uint32  4231  (packets_forwarded)
+ce 00 00 0f 3c         # uint32  3900  (announces_rebroadcast)
+ce 00 00 01 4b         # uint32   331  (data_forwarded)
+ce 00 00 13 9f         # uint32  5023  (inbound_packets)
 ```
 
-Total: 23 bytes.
+Total: 38 bytes.
 
-A node with no position fix configured:
+A node with no position fix configured and zeroed counters (the
+shape a freshly-booted node emits at its first 2-h beacon):
 
 ```
-95
+98
 c0                     # nil
 c0                     # nil
-cd 0f 6c               # uint16  3948 mV
-cd 00 0c               # uint16  12
-ce 00 00 10 87         # uint32  4231
+cd 00 00               # uint16  0
+cd 00 00               # uint16  0
+ce 00 00 00 00         # uint32  0
+ce 00 00 00 00         # uint32  0
+ce 00 00 00 00         # uint32  0
+ce 00 00 00 00         # uint32  0
 ```
 
-Total: 15 bytes.
+Total: 30 bytes.
 
 ---
 
@@ -192,7 +214,8 @@ Total: 15 bytes.
 
 ### `packets_forwarded`
 - Units: count, cumulative since last boot.
-- Definition: sum of these `Transport::Stats` counters at emit time:
+- Definition: aggregate of these `Transport::Stats` counters at emit
+  time (kept for back-compat with the v0.1.0..v0.1.3 schema):
   - `announces_rebroadcast`
   - `data_forwarded_header_1`
   - `data_forwarded_header_2`
@@ -204,9 +227,38 @@ Total: 15 bytes.
   counter regression: if `packets_forwarded[t+1] < packets_forwarded[t]`
   for the same `destination_hash`, the node restarted.
 
+### `announces_rebroadcast`
+- Units: count, cumulative since last boot.
+- Definition: number of §12.3 announce relays this node has emitted.
+- Why expose it discretely: this is the "is the relay path actually
+  alive?" counter. A node that's hearing peers but not relaying will
+  show `inbound_packets` rising while `announces_rebroadcast` stays
+  at 0 — likely `transport_enabled` was off, or the rebroadcast queue
+  is overflowing. A node behaving correctly will show this growing
+  alongside `inbound_packets`.
+
+### `data_forwarded`
+- Units: count, cumulative since last boot.
+- Definition: sum of `data_forwarded_header_1` + `data_forwarded_header_2`
+  — every DATA packet the node relayed (HEADER_2-with-our-id received
+  and forwarded toward `path.next_hop`, plus the §12.2.2 last-hop strip).
+- Reset and reboot semantics same as the other counters.
+
+### `inbound_packets`
+- Units: count, cumulative since last boot.
+- Definition: every packet that successfully parsed at the wire-format
+  layer (regardless of whether it was for us, dropped on dedup, etc.).
+  This is the denominator for "how busy is this node's airwaves?".
+- A useful derived metric: `announces_rebroadcast / inbound_packets`
+  ≈ fraction of received traffic this node felt compelled to relay.
+  A pure-leaf node would be 0; a heavily-loaded relay would be high.
+
 ---
 
 ## 6. Decoder snippets
+
+All decoders below tolerate both the legacy 5-element and the
+current 8-element form (per the forward-compat rule in §7).
 
 ### 6.1 JavaScript (msgpack-lite)
 
@@ -227,6 +279,10 @@ function decodeTelemetry(appDataBytes) {
     battery_mv,
     route_count,
     packets_forwarded,
+    // v0.1.4+ — undefined when an older node's beacon is decoded.
+    announces_rebroadcast: arr[5],
+    data_forwarded:        arr[6],
+    inbound_packets:       arr[7],
   };
 }
 ```
@@ -243,13 +299,18 @@ def decode_telemetry(app_data: bytes):
     if not isinstance(arr, list) or len(arr) < 5:
         raise ValueError("telemetry: not a 5+ element array")
     lat, lon, batt, routes, fwd = arr[:5]
-    return {
+    out = {
         "kind": "beacon",
         "position": None if lat is None or lon is None else (lat, lon),
         "battery_mv": batt,
         "route_count": routes,
         "packets_forwarded": fwd,
     }
+    # v0.1.4+ — None when an older node's beacon is decoded.
+    out["announces_rebroadcast"] = arr[5] if len(arr) > 5 else None
+    out["data_forwarded"]        = arr[6] if len(arr) > 6 else None
+    out["inbound_packets"]       = arr[7] if len(arr) > 7 else None
+    return out
 ```
 
 ### 6.3 Kotlin (org.msgpack:msgpack-core)
@@ -262,6 +323,9 @@ data class Telemetry(
     val batteryMv: Int,
     val routeCount: Int,
     val packetsForwarded: Long,
+    val announcesRebroadcast: Long? = null,  // v0.1.4+; null for older beacons
+    val dataForwarded: Long? = null,
+    val inboundPackets: Long? = null,
 )
 
 fun decodeTelemetry(appData: ByteArray): Telemetry? {
@@ -276,8 +340,12 @@ fun decodeTelemetry(appData: ByteArray): Telemetry? {
         val routes = u.unpackInt()
         val fwd = u.unpackLong()
 
+        val rebroadcast = if (arity > 5) u.unpackLong() else null
+        val dataFwd     = if (arity > 6) u.unpackLong() else null
+        val inbound     = if (arity > 7) u.unpackLong() else null
+
         val pos = if (lat != null && lon != null) Pair(lat, lon) else null
-        return Telemetry(pos, batt, routes, fwd)
+        return Telemetry(pos, batt, routes, fwd, rebroadcast, dataFwd, inbound)
     }
 }
 ```

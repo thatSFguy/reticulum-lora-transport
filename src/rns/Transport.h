@@ -67,6 +67,29 @@ struct PathUpdate {
 };
 using PathObserverFn = std::function<void(const PathUpdate&)>;
 
+// Fired right before Transport hands a wire to an Interface for
+// transmission. Lets firmware glue tag every TX line in the serial
+// log with WHY the node is emitting (own scheduled announce vs.
+// relay rebroadcast vs. path-response vs. DATA/PROOF/LINK forward),
+// which is otherwise indistinguishable in the radio-layer log.
+//
+// Fires once per (Transport, Interface) emit decision. With one
+// interface there's a 1:1 pairing with the Radio TX log. For a
+// queued rebroadcast the actual on-air emission may lag the
+// observer call by milliseconds (queue drained on next Interface
+// tick); a missing Radio TX line after a tx-observer line means
+// the queue rejected the entry.
+enum class TxKind : uint8_t {
+    OwnAnnounce,         // scheduled local announce (alive or telemetry beacon)
+    PathResponse,        // §7.2 — answering a path request
+    Rebroadcast,         // §12.3 — forwarding a peer's announce
+    DataForward,         // §12.2 — forwarding a DATA packet
+    ProofForward,        // §12.5 — forwarding a PROOF packet
+    LinkForward,         // §6.x — forwarding LINKREQUEST, LINKPROOF, or link DATA
+    PathRequestForward,  // §7.2 — forwarding an unanswered path request
+};
+using TxObserverFn = std::function<void(TxKind)>;
+
 class Transport {
 public:
     // The local node's identity. Required for self-announce filtering
@@ -139,6 +162,13 @@ public:
     // (§4.5 step 6.3). Firmware uses this to print a "route tracked"
     // log line. Setting nullptr (default) disables the hook.
     void set_path_observer(PathObserverFn fn) { _path_observer = std::move(fn); }
+
+    // Optional observer fired before every Transport-level emit.
+    // Firmware uses this to tag each TX line in the serial log with
+    // its kind (own / relay / path-response / fwd-data / etc.), which
+    // is otherwise indistinguishable in the radio-layer log. Setting
+    // nullptr (default) disables the hook.
+    void set_tx_observer(TxObserverFn fn) { _tx_observer = std::move(fn); }
 
     // Build and emit an announce for a registered local destination.
     // Returns true if emitted, false if the dest_hash isn't local or
@@ -267,6 +297,7 @@ private:
     std::vector<AnnounceHandler> _announce_handlers;
     AnnounceSeedFn _announce_seed_fn;
     PathObserverFn _path_observer;
+    TxObserverFn   _tx_observer;
 
     struct ScheduledAnnounce {
         Bytes           dest_hash;

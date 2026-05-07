@@ -100,16 +100,23 @@ rns::telemetry::Snapshot make_telemetry_snapshot() {
     if (g_transport) {
         s.route_count = static_cast<uint16_t>(
             g_transport->path_table().size());
-        // Sum of forward-path emissions — what a network-health
-        // dashboard would chart as "this node's relay throughput".
-        // Schema-frozen: keep this exact set even if Stats grows.
         const auto& st = g_transport->stats();
+        // [4] aggregate — what a network-health dashboard would chart
+        // as "this node's relay throughput". Kept for backward compat.
         s.packets_forwarded = static_cast<uint32_t>(
             st.announces_rebroadcast +
             st.data_forwarded_header_1 +
             st.data_forwarded_header_2 +
             st.proof_forwarded +
             st.link_data_forwarded);
+        // [5..7] discrete counters so a remote observer can verify
+        // *what* the node is actually relaying without serial access.
+        // §12.3 announce relays specifically — proves the relay path
+        // is alive even when no DATA traffic is flowing.
+        s.announces_rebroadcast = static_cast<uint32_t>(st.announces_rebroadcast);
+        s.data_forwarded        = static_cast<uint32_t>(
+            st.data_forwarded_header_1 + st.data_forwarded_header_2);
+        s.inbound_packets       = static_cast<uint32_t>(st.inbound_packets);
     }
     return s;
 }
@@ -195,6 +202,26 @@ void setup() {
     // transport node itself — the dest_hash is stable across boots
     // because Identity persists.
     g_transport->set_announce_seed_fn(announce_seed_fn);
+
+    // Tag every Transport-level emit with WHY we're transmitting. The
+    // radio-layer log only knows the wire bytes; this disambiguates
+    // own scheduled announces from rebroadcast vs path-response vs
+    // DATA/PROOF/LINK forwards. Pairs with the next "Radio: TX ..."
+    // line for a complete picture.
+    g_transport->set_tx_observer([](rns::TxKind k) {
+        const char* tag = "?";
+        switch (k) {
+            case rns::TxKind::OwnAnnounce:        tag = "own-announce";      break;
+            case rns::TxKind::PathResponse:       tag = "path-response";     break;
+            case rns::TxKind::Rebroadcast:        tag = "relay-announce";    break;
+            case rns::TxKind::DataForward:        tag = "fwd-data";          break;
+            case rns::TxKind::ProofForward:       tag = "fwd-proof";         break;
+            case rns::TxKind::LinkForward:        tag = "fwd-link";          break;
+            case rns::TxKind::PathRequestForward: tag = "fwd-path-request";  break;
+        }
+        Serial.print("rlr: tx ");
+        Serial.println(tag);
+    });
 
     // Surface every path-table insert/update on Serial so the operator
     // can watch the routing table grow as announces arrive. The first

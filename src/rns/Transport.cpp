@@ -62,10 +62,16 @@ bool Transport::emit_announce_for_local(const Bytes& dest_hash,
                                            /*ratchet_pub=*/{},
                                            path_response);
 
+    const TxKind kind = path_response ? TxKind::PathResponse
+                                      : TxKind::OwnAnnounce;
     if (only_on) {
+        if (_tx_observer) _tx_observer(kind);
         only_on->transmit_now(wire);
     } else {
-        for (Interface* iface : _interfaces) iface->transmit_now(wire);
+        for (Interface* iface : _interfaces) {
+            if (_tx_observer) _tx_observer(kind);
+            iface->transmit_now(wire);
+        }
     }
     return true;
 }
@@ -153,6 +159,7 @@ void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
         // an announce ever reaches this queue), and self-announces
         // are filtered by identity match (§9.5).
         for (Interface* iface : _interfaces) {
+            if (_tx_observer) _tx_observer(TxKind::Rebroadcast);
             iface->queue_announce(entry.announce_wire, entry.announce_hops);
         }
         _stats.announces_rebroadcast++;
@@ -370,6 +377,7 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
 
     auto fwd = compute_relay_forward(packet, *path);
     if (!fwd) return;
+    if (_tx_observer) _tx_observer(TxKind::DataForward);
     fwd->outbound_if->transmit_now(fwd->wire);
 
     if (path->hops > 1) _stats.data_forwarded_header_2++;
@@ -411,6 +419,7 @@ void Transport::handle_proof_forward(Interface* received_on, const Packet& packe
     _reverse_table.pop(packet.destination_hash());  // consume on success
     // hops byte was already incremented at inbound() entry; emit the
     // packet wire as-is (matches §12.5.3's "flags + new_hops + rest").
+    if (_tx_observer) _tx_observer(TxKind::ProofForward);
     fwd->transmit_now(packet.wire_bytes());
     _stats.proof_forwarded++;
 }
@@ -495,6 +504,7 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
         bool emitted_any = false;
         for (Interface* iface : _interfaces) {
             if (iface == received_on) continue;
+            if (_tx_observer) _tx_observer(TxKind::PathRequestForward);
             iface->transmit_now(packet.wire_bytes());
             emitted_any = true;
         }
@@ -527,6 +537,7 @@ void Transport::emit_path_response(Interface* out, const PathEntry& path) {
     // immediately. transmit_now bypasses the announce-cap budget,
     // which matches branch 2's "this is a path-resolver answer, not
     // a periodic re-announce" semantic.
+    if (_tx_observer) _tx_observer(TxKind::PathResponse);
     out->transmit_now(wire);
 }
 
@@ -563,6 +574,7 @@ void Transport::handle_link_request_forward(Interface* received_on,
     // the responder receives the clamped form and signs over it in
     // LRPROOF (§6.6.5).
     maybe_clamp_lr_signalling(fwd->wire, fwd->outbound_if->hw_mtu_bytes());
+    if (_tx_observer) _tx_observer(TxKind::LinkForward);
     fwd->outbound_if->transmit_now(fwd->wire);
 
     // §12.2.4 — write link_table entry keyed by §6.3 link_id. The
@@ -644,6 +656,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
         _stats.link_proofs_invalid++;
         return;
     }
+    if (_tx_observer) _tx_observer(TxKind::LinkForward);
     fwd->transmit_now(packet.wire_bytes());
     _stats.link_proofs_forwarded++;
 
@@ -676,6 +689,7 @@ void Transport::handle_link_data_forward(Interface* received_on,
     else if (received_on == entry->nh_if)   fwd = entry->rcvd_if;
     if (!fwd) return;  // arrived on a third interface — drop silently
 
+    if (_tx_observer) _tx_observer(TxKind::LinkForward);
     fwd->transmit_now(packet.wire_bytes());
     _stats.link_data_forwarded++;
 
