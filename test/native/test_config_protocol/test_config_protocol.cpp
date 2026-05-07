@@ -104,7 +104,13 @@ void test_ping_without_transport_returns_version() {
     bool found = response_with(resp, "version", [](Reader& r) {
         std::string ver;
         TEST_ASSERT_TRUE(r.read_str(ver));
-        TEST_ASSERT_EQUAL_STRING("v0.1", ver.c_str());
+        // FIRMWARE_VERSION is injected at compile time via the
+        // scripts/inject_fw_version.py PIO pre-build script for
+        // firmware envs; the native test env doesn't run that
+        // script, so we get the "dev" fallback. We just verify the
+        // field is present and non-empty — the exact value depends
+        // on the build environment.
+        TEST_ASSERT_TRUE(ver.size() > 0);
     });
     TEST_ASSERT_TRUE(found);
 }
