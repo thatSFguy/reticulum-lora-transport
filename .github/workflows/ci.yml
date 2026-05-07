@@ -7,6 +7,40 @@ on:
   pull_request:
 
 jobs:
+  interop:
+    name: Live interop — announce vectors vs upstream RNS
+    runs-on: ubuntu-latest
+    # Don't fail the whole workflow if upstream RNS install / test runs
+    # flake — informational only. Once the validator is stable across
+    # several rns releases, drop continue-on-error to start gating.
+    continue-on-error: true
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: reticulum-lora-transport
+
+      - name: Checkout reticulum-specifications (sibling layout)
+        uses: actions/checkout@v4
+        with:
+          repository: thatSFguy/reticulum-specifications
+          path: reticulum-specifications
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install upstream RNS
+        # Pin nothing — we want to detect the day rns ships a wire
+        # format change. If the validator starts failing after an rns
+        # release, that's the alarm and we either regenerate the
+        # snapshot or fix our parser.
+        run: pip install --upgrade rns
+
+      - name: Validate pinned announce vectors
+        working-directory: reticulum-lora-transport
+        run: python tools/interop/validate_announce_vectors.py ../reticulum-specifications
+
   native-tests:
     name: Native unit tests (ASAN+UBSAN)
     runs-on: ubuntu-latest
