@@ -102,7 +102,8 @@ public:
     bool   at_end() const { return _off >= _buf->size(); }
 
     // Tagged element type — peek without consuming.
-    enum class Type { NIL, BOOL, UINT, FLOAT32, STR, BIN, ARRAY, MAP, INVALID };
+    enum class Type { NIL, BOOL, UINT, INT_SIGNED, FLOAT32, FLOAT64,
+                      STR, BIN, ARRAY, MAP, INVALID };
     Type peek_type() const;
 
     // Type-specific reads. Each consumes one msgpack element on
@@ -110,7 +111,20 @@ public:
     // cursor is not guaranteed to be at any particular position.
     bool read_nil();
     bool read_bool(bool& out);
-    bool read_uint(uint64_t& out);   // accepts fixint + uint8/16/32/64
+    bool read_uint(uint64_t& out);   // accepts fixint + uint8/16/32/64 ONLY
+    // Accepts BOTH unsigned (positive fixint, uint8/16/32/64) AND
+    // signed (negative fixint, int8/16/32/64) msgpack integer
+    // encodings. Use this for any field that might receive a value
+    // from a JS / Python encoder — those encoders pick the smallest
+    // signed representation by default, so a JS `lat_udeg: -122419400`
+    // arrives as msgpack int32, not as a uint32 bit-pattern.
+    bool read_int(int64_t& out);
+    // Accepts BOTH float32 (0xca) and float64 (0xcb). float64 values
+    // are downcast to float — fine for our config-tier precision
+    // (battery dividers, lat/lon already int32 microdegrees, etc.).
+    // JS numbers are doubles, so @msgpack/msgpack defaults to float64
+    // for any non-integer; without float64 acceptance every webclient
+    // batt_mult write would fail.
     bool read_float32(float& out);
     bool read_str(std::string& out); // fixstr / str8 / str16
     bool read_bin(Bytes& out);       // bin8 / bin16

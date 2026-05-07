@@ -136,7 +136,10 @@ Reader::Type Reader::peek_type() const {
     if (t == 0xc2 || t == 0xc3)          return Type::BOOL;
     if (t < 0x80)                        return Type::UINT;     // positive fixint
     if (t >= 0xcc && t <= 0xcf)          return Type::UINT;     // uint8/16/32/64
+    if (t >= 0xe0)                       return Type::INT_SIGNED; // negative fixint
+    if (t >= 0xd0 && t <= 0xd3)          return Type::INT_SIGNED; // int8/16/32/64
     if (t == 0xca)                       return Type::FLOAT32;
+    if (t == 0xcb)                       return Type::FLOAT64;
     if ((t & 0xe0) == 0xa0)              return Type::STR;      // fixstr
     if (t == 0xd9 || t == 0xda)          return Type::STR;      // str8 / str16
     if (t == 0xc4 || t == 0xc5)          return Type::BIN;      // bin8 / bin16
@@ -189,13 +192,79 @@ bool Reader::read_uint(uint64_t& out) {
     }
 }
 
+bool Reader::read_int(int64_t& out) {
+    if (!need(1)) return false;
+    const uint8_t t = read_u8();
+    // Positive fixint (0x00..0x7f) — value IS the byte.
+    if (t < 0x80) { out = static_cast<int64_t>(t); return true; }
+    // Negative fixint (0xe0..0xff) — value is signed 5-bit.
+    if (t >= 0xe0) { out = static_cast<int64_t>(static_cast<int8_t>(t)); return true; }
+    switch (t) {
+        // Unsigned widths — bit-for-bit, but reject if MSB would
+        // overflow int64 to keep the contract clean.
+        case 0xcc:
+            if (!need(1)) return false;
+            out = static_cast<int64_t>(read_u8());
+            return true;
+        case 0xcd:
+            if (!need(2)) return false;
+            out = static_cast<int64_t>(read_be16());
+            return true;
+        case 0xce:
+            if (!need(4)) return false;
+            out = static_cast<int64_t>(read_be32());
+            return true;
+        case 0xcf:
+            if (!need(8)) return false;
+            {
+                uint64_t v = read_be64();
+                if (v > static_cast<uint64_t>(INT64_MAX)) { _ok = false; return false; }
+                out = static_cast<int64_t>(v);
+            }
+            return true;
+        // Signed widths — sign-extend native.
+        case 0xd0:
+            if (!need(1)) return false;
+            out = static_cast<int64_t>(static_cast<int8_t>(read_u8()));
+            return true;
+        case 0xd1:
+            if (!need(2)) return false;
+            out = static_cast<int64_t>(static_cast<int16_t>(read_be16()));
+            return true;
+        case 0xd2:
+            if (!need(4)) return false;
+            out = static_cast<int64_t>(static_cast<int32_t>(read_be32()));
+            return true;
+        case 0xd3:
+            if (!need(8)) return false;
+            out = static_cast<int64_t>(read_be64());
+            return true;
+        default:
+            _ok = false;
+            return false;
+    }
+}
+
 bool Reader::read_float32(float& out) {
     if (!need(1)) return false;
-    if (read_u8() != 0xca) { _ok = false; return false; }
-    if (!need(4)) return false;
-    uint32_t bits = read_be32();
-    std::memcpy(&out, &bits, 4);
-    return true;
+    const uint8_t t = read_u8();
+    if (t == 0xca) {
+        if (!need(4)) return false;
+        uint32_t bits = read_be32();
+        std::memcpy(&out, &bits, 4);
+        return true;
+    }
+    if (t == 0xcb) {
+        // float64 from a JS / Python encoder — downcast.
+        if (!need(8)) return false;
+        uint64_t bits = read_be64();
+        double d;
+        std::memcpy(&d, &bits, 8);
+        out = static_cast<float>(d);
+        return true;
+    }
+    _ok = false;
+    return false;
 }
 
 bool Reader::read_str(std::string& out) {
@@ -285,12 +354,14 @@ bool Reader::read_map_header(size_t& out) {
 bool Reader::skip_value() {
     const Type t = peek_type();
     switch (t) {
-        case Type::NIL:     return read_nil();
-        case Type::BOOL:    { bool b; return read_bool(b); }
-        case Type::UINT:    { uint64_t v; return read_uint(v); }
-        case Type::FLOAT32: { float f; return read_float32(f); }
-        case Type::STR:     { std::string s; return read_str(s); }
-        case Type::BIN:     { Bytes b; return read_bin(b); }
+        case Type::NIL:        return read_nil();
+        case Type::BOOL:       { bool b; return read_bool(b); }
+        case Type::UINT:       { uint64_t v; return read_uint(v); }
+        case Type::INT_SIGNED: { int64_t v; return read_int(v); }
+        case Type::FLOAT32:    { float f; return read_float32(f); }
+        case Type::FLOAT64:    { float f; return read_float32(f); }  // accepts both
+        case Type::STR:        { std::string s; return read_str(s); }
+        case Type::BIN:        { Bytes b; return read_bin(b); }
         case Type::ARRAY: {
             size_t n;
             if (!read_array_header(n)) return false;

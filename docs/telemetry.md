@@ -8,6 +8,10 @@ The schema below is **frozen** — fields can be added at the tail in
 later versions, but existing indices and meanings are stable. Treat
 extra fields as forward-compatible noise and ignore them.
 
+> **Companion docs:**
+> - [`transport_node_programming.md`](transport_node_programming.md) — the BLE / Serial config protocol the webclient uses to provision a node (frequency, lat/lon, display_name, etc.)
+> - **Live flasher** for nRF52840 boards: <https://thatsfguy.github.io/reticulum-lora-webclient/flasher.html>
+
 ---
 
 ## 1. What a node emits

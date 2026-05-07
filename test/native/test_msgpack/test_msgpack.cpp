@@ -208,6 +208,77 @@ void test_reader_float32() {
     TEST_ASSERT_EQUAL_FLOAT(1.0f, f);
 }
 
+// read_int handles all signed encodings (negative fixint + int8/16/32/64).
+// Critical for the webclient's natural negative-int encoding.
+void test_reader_int_signed_widths() {
+    // negative fixint (-1) = 0xff, sign-bit treated as int8
+    {
+        Bytes b = Bytes::from_hex("ff");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(-1, v);
+    }
+    // int8(-50) = d0 ce  (0xce as signed = -50)
+    {
+        Bytes b = Bytes::from_hex("d0ce");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(-50, v);
+    }
+    // int16(-1000) = d1 fc 18
+    {
+        Bytes b = Bytes::from_hex("d1fc18");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(-1000, v);
+    }
+    // int32(-122419400) = d2 f8 d3 8d b8  (msgpack encoding of -122419400 = lon_udeg
+    // for San Francisco — exactly the case the webclient hits for save-config)
+    {
+        Bytes b = Bytes::from_hex("d2f8d38db8");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(-122419400, v);
+    }
+    // int64(-1) = d3 ff ff ff ff ff ff ff ff
+    {
+        Bytes b = Bytes::from_hex("d3ffffffffffffffff");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(-1, v);
+    }
+}
+
+// read_int also accepts unsigned encodings transparently — both
+// callers can use it uniformly.
+void test_reader_int_accepts_uint_encodings() {
+    // positive fixint(42) = 0x2a
+    {
+        Bytes b = Bytes::from_hex("2a");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(42, v);
+    }
+    // uint32(904375000) = ce 35 e2 1d 18 — typical freq_hz value
+    {
+        Bytes b = Bytes::from_hex("ce35e21d18");
+        Reader r(b); int64_t v = 0;
+        TEST_ASSERT_TRUE(r.read_int(v));
+        TEST_ASSERT_EQUAL_INT64(904375000, v);
+    }
+}
+
+// read_float32 accepts both float32 (0xca) and float64 (0xcb).
+// JS numbers default to float64 in @msgpack/msgpack, so without this
+// every batt_mult write would fail.
+void test_reader_float32_accepts_float64() {
+    // float64(1.284) = cb 3f f4 8b 43 95 81 06 25
+    Bytes b = Bytes::from_hex("cb3ff48b4395810625");
+    Reader r(b); float f = 0;
+    TEST_ASSERT_TRUE(r.read_float32(f));
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 1.284f, f);
+}
+
 void test_reader_str_fixstr_and_str8() {
     Writer w;
     w.str("hi");
@@ -346,6 +417,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_reader_nil);
     RUN_TEST(test_reader_bool);
     RUN_TEST(test_reader_uint_widths);
+    RUN_TEST(test_reader_int_signed_widths);
+    RUN_TEST(test_reader_int_accepts_uint_encodings);
+    RUN_TEST(test_reader_float32_accepts_float64);
     RUN_TEST(test_reader_float32);
     RUN_TEST(test_reader_str_fixstr_and_str8);
     RUN_TEST(test_reader_bin8);

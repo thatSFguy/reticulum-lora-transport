@@ -87,29 +87,36 @@ int apply_set_fields(Reader& r, Config& cfg, size_t pairs_remaining) {
         std::string key;
         if (!r.read_str(key)) return -1;
 
+        // All integer fields use read_int — accepts both unsigned
+        // (positive fixint, uint8/16/32/64) AND signed (negative
+        // fixint, int8/16/32/64) msgpack encodings. JS / Python
+        // encoders pick the smallest signed form by default for
+        // negative values, so a webclient `lat_udeg: -122419400`
+        // arrives as msgpack int32. Without read_int we'd reject
+        // it as malformed.
         if (key == "freq_hz") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.freq_hz = static_cast<uint32_t>(v); applied++;
         } else if (key == "bw_hz") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.bw_hz = static_cast<uint32_t>(v); applied++;
         } else if (key == "sf") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.sf = static_cast<uint8_t>(v); applied++;
         } else if (key == "cr") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.cr = static_cast<uint8_t>(v); applied++;
         } else if (key == "txp_dbm") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
-            cfg.txp_dbm = static_cast<int8_t>(static_cast<int32_t>(v)); applied++;
+            int64_t v; if (!r.read_int(v)) return -1;
+            cfg.txp_dbm = static_cast<int8_t>(v); applied++;
         } else if (key == "lat_udeg") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.latitude_udeg = static_cast<int32_t>(v); applied++;
         } else if (key == "lon_udeg") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.longitude_udeg = static_cast<int32_t>(v); applied++;
         } else if (key == "alt_m") {
-            uint64_t v; if (!r.read_uint(v)) return -1;
+            int64_t v; if (!r.read_int(v)) return -1;
             cfg.altitude_m = static_cast<int32_t>(v); applied++;
         } else if (key == "batt_mult") {
             float v; if (!r.read_float32(v)) return -1;
