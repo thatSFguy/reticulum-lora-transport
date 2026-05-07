@@ -66,7 +66,13 @@ bool init(rlr::Config& cfg,
     s_save      = std::move(save);
 
     Bluefruit.begin();
-    Bluefruit.setName("rlr-transport");
+    // Per-device name: cfg.display_name is stamped at first boot to
+    // "Rptr-XXXXXXXX" (4 bytes of identity_hash), so each repeater
+    // shows a unique label on BLE scanners. Falls back to a static
+    // family name if Config persistence ever returns an empty string.
+    const char* ble_name =
+        (cfg.display_name[0] != '\0') ? cfg.display_name : "rlr-transport";
+    Bluefruit.setName(ble_name);
     Bluefruit.setTxPower(4);  // dBm; max for nRF52840 BLE radio
 
     // Register service + characteristics.

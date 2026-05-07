@@ -88,7 +88,7 @@ void test_msgpack_full_payload_assembly() {
 }
 
 // §telemetry encoder — full snapshot with position.
-//   array(8)                  = 0x98
+//   array(9)                  = 0x99
 //   float32 1.0               = 0xca 3f800000   (lat)
 //   float32 -1.0              = 0xca bf800000   (lon)
 //   uint16 3700               = 0xcd 0e74       (battery_mv)
@@ -97,6 +97,8 @@ void test_msgpack_full_payload_assembly() {
 //   uint32 17                 = 0xce 00000011   (announces_rebroadcast)
 //   uint32 5                  = 0xce 00000005   (data_forwarded)
 //   uint32 100                = 0xce 00000064   (inbound_packets)
+//   fixstr "Rptr-aabbccdd"    = 0xad 52707472 2d61616262 6363646\
+//                                  hex form: ad 5270 7472 2d61 6162 6263 6364 64
 void test_telemetry_encode_with_position() {
     rns::telemetry::Snapshot s;
     s.have_position          = true;
@@ -108,9 +110,10 @@ void test_telemetry_encode_with_position() {
     s.announces_rebroadcast  = 17;
     s.data_forwarded         = 5;
     s.inbound_packets        = 100;
+    s.name                   = "Rptr-aabbccdd";  // 13 chars — fixstr 0xa0|13 = 0xad
     Bytes out = rns::telemetry::encode(s);
     TEST_ASSERT_EQUAL_STRING(
-        "98"
+        "99"
         "ca3f800000"
         "cabf800000"
         "cd0e74"
@@ -118,7 +121,8 @@ void test_telemetry_encode_with_position() {
         "ce000003e8"
         "ce00000011"
         "ce00000005"
-        "ce00000064",
+        "ce00000064"
+        "ad52707472" "2d6161626263636464",
         out.to_hex().c_str());
 }
 
@@ -291,8 +295,10 @@ void test_reader_skip_value() {
     TEST_ASSERT_EQUAL_UINT64(0xAA, v);
 }
 
-// Without position: lat/lon are nil; counters are zero (the wire
-// shape a freshly-booted node emits at its first 2-h beacon).
+// Without position: lat/lon are nil; counters are zero; name is
+// the empty string (the wire shape a freshly-booted node would emit
+// if it had no display_name yet — main.cpp normally stamps one
+// before the first beacon, so this is the absolute floor).
 void test_telemetry_encode_without_position() {
     rns::telemetry::Snapshot s;
     s.have_position          = false;
@@ -302,9 +308,10 @@ void test_telemetry_encode_without_position() {
     s.announces_rebroadcast  = 0;
     s.data_forwarded         = 0;
     s.inbound_packets        = 0;
+    // s.name defaults to "" — emits as fixstr 0xa0 (length 0).
     Bytes out = rns::telemetry::encode(s);
     TEST_ASSERT_EQUAL_STRING(
-        "98"
+        "99"
         "c0"
         "c0"
         "cd0000"
@@ -312,7 +319,8 @@ void test_telemetry_encode_without_position() {
         "ce00000000"
         "ce00000000"
         "ce00000000"
-        "ce00000000",
+        "ce00000000"
+        "a0",
         out.to_hex().c_str());
 }
 

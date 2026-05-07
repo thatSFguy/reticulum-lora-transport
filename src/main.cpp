@@ -97,6 +97,8 @@ rns::telemetry::Snapshot make_telemetry_snapshot() {
 
     s.battery_mv = rlr::battery::read_mv(g_cfg.batt_mult);
 
+    s.name = g_cfg.display_name;  // [8] — operator label or auto "Rptr-XXXXXXXX"
+
     if (g_transport) {
         s.route_count = static_cast<uint16_t>(
             g_transport->path_table().size());
@@ -179,6 +181,25 @@ void setup() {
     // Identity + Transport. Loaded from flash if present, otherwise
     // generated fresh from the radio's RNG and persisted.
     auto identity = load_or_generate_identity();
+
+    // Stamp a unique default display_name on first boot so each
+    // repeater is distinguishable on BLE scans and in the webapp's
+    // device list. Format: "Rptr-XXXXXXXX" — first 4 bytes of
+    // identity_hash hex (32 bits = 4 billion variations, plenty for
+    // a small fleet, fits in BLE's name length cap). Persists once;
+    // operator can override via the webapp.
+    if (g_cfg.display_name[0] == '\0') {
+        const auto& h = identity.identity_hash();
+        snprintf(g_cfg.display_name, sizeof(g_cfg.display_name),
+                 "Rptr-%02x%02x%02x%02x",
+                 (unsigned)h[0], (unsigned)h[1],
+                 (unsigned)h[2], (unsigned)h[3]);
+        if (rlr::config_store::save(g_cfg)) {
+            Serial.print(F("rlr: assigned default name: "));
+            Serial.println(g_cfg.display_name);
+        }
+    }
+
     g_transport = new rns::Transport(std::move(identity),
                                      /*transport_enabled=*/true);
 

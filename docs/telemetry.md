@@ -102,10 +102,10 @@ discarded.
 
 ## 4. Telemetry payload (msgpack)
 
-`app_data` of a beacon is a single msgpack **8-element fixarray**
+`app_data` of a beacon is a single msgpack **9-element fixarray**
 with explicit-width numeric tags. The encoder always emits these
-exact tags — no smallest-fits compression — so byte layout is
-deterministic.
+exact tags — no smallest-fits compression for the numerics — so
+byte layout is deterministic.
 
 ```
 [0] lat                  : float32  OR  nil
@@ -116,18 +116,21 @@ deterministic.
 [5] announces_rebroadcast: uint32   (§12.3 announce relays only)
 [6] data_forwarded       : uint32   (DATA forwards across both header forms)
 [7] inbound_packets      : uint32   (every parsed inbound — the denominator)
+[8] name                 : str      (operator-set label, or the auto-stamped
+                                     "Rptr-XXXXXXXX" first-boot default)
 ```
 
 Indices 0..4 are stable from v0.1.0. Indices 5..7 were added in
-v0.1.4. Per the forward-compat rule (§7), older decoders that read
-only 5 elements continue to work against newer beacons; newer
-decoders MUST tolerate older beacons that stop at index 4.
+v0.1.4. Index 8 was added in v0.1.6. Per the forward-compat rule
+(§7), older decoders that read only 5 elements continue to work
+against newer beacons; newer decoders MUST tolerate older beacons
+that stop at index 4 / 7.
 
 ### 4.1 Wire byte layout
 
 | Byte(s) | Hex | Meaning |
 |---|---|---|
-| 0 | `98` | fixarray of length 8 |
+| 0 | `99` | fixarray of length 9 |
 | 1 | `ca` *or* `c0` | float32 tag (lat) **or** nil |
 | 2..5 | 4 bytes BE | lat IEEE-754 float32 (omitted if nil) |
 | next | `ca` *or* `c0` | float32 tag (lon) **or** nil |
@@ -144,18 +147,20 @@ decoders MUST tolerate older beacons that stop at index 4.
 | +4 | 4 bytes BE | DATA forwards (both header forms) |
 | next | `ce` | uint32 tag (inbound_packets) |
 | +4 | 4 bytes BE | total parsed inbound packets |
+| next | `a0..bf` *or* `d9 NN` | str header — fixstr (`0xa0 \| len`) for len 0–31, `str8` for 32–255 |
+| +len | UTF-8 bytes | `name` string contents |
 
 Position-only (no msgpack-rpc map keys), so element order is the
 schema. Do not reorder.
 
 ### 4.2 Worked example
 
-A node at lat 37.7749° / lon -122.4194° with 3.95 V battery,
-12 known routes, 4231 total packets forwarded (3900 announce
-rebroadcasts + 331 data forwards), 5023 inbound packets:
+A node named `Rptr-aabbccdd` at lat 37.7749° / lon -122.4194° with
+3.95 V battery, 12 known routes, 4231 total packets forwarded (3900
+announce rebroadcasts + 331 data forwards), 5023 inbound packets:
 
 ```
-98
+99
 ca 42 17 18 b4         # float32  37.7749
 ca c2 f4 d6 e9         # float32 -122.4194
 cd 0f 6c               # uint16  3948 mV
@@ -164,15 +169,18 @@ ce 00 00 10 87         # uint32  4231  (packets_forwarded)
 ce 00 00 0f 3c         # uint32  3900  (announces_rebroadcast)
 ce 00 00 01 4b         # uint32   331  (data_forwarded)
 ce 00 00 13 9f         # uint32  5023  (inbound_packets)
+ad 52 70 74 72 2d 61 61 62 62 63 63 64 64    # fixstr "Rptr-aabbccdd"
 ```
 
-Total: 38 bytes.
+Total: 52 bytes.
 
-A node with no position fix configured and zeroed counters (the
-shape a freshly-booted node emits at its first 2-h beacon):
+A node with no position fix configured, zeroed counters, and an
+empty `name` (the absolute floor — main.cpp normally stamps a
+default `Rptr-XXXXXXXX` before the first beacon, so you'd see the
+14-byte name field rather than `0xa0` in practice):
 
 ```
-98
+99
 c0                     # nil
 c0                     # nil
 cd 00 00               # uint16  0
@@ -181,9 +189,10 @@ ce 00 00 00 00         # uint32  0
 ce 00 00 00 00         # uint32  0
 ce 00 00 00 00         # uint32  0
 ce 00 00 00 00         # uint32  0
+a0                     # fixstr length 0
 ```
 
-Total: 30 bytes.
+Total: 31 bytes.
 
 ---
 
@@ -253,12 +262,26 @@ Total: 30 bytes.
   ≈ fraction of received traffic this node felt compelled to relay.
   A pure-leaf node would be 0; a heavily-loaded relay would be high.
 
+### `name`
+- Units: UTF-8 string, max 31 bytes (Config.display_name is a 32-byte
+  NUL-terminated buffer in the firmware).
+- Definition: operator-set human label, set via the webapp's config
+  protocol. On first boot the firmware auto-stamps a default of the
+  form `Rptr-XXXXXXXX` where `XXXXXXXX` is the first 4 bytes of the
+  node's `identity_hash` in hex — guaranteeing every fresh node has a
+  unique label even before anyone configures it.
+- Persists across reboots in the on-flash Config.
+- A receiving client SHOULD render this as the human label for the
+  node alongside the destination_hash. Empty string means "unset" —
+  fall back to showing the destination_hash short form.
+
 ---
 
 ## 6. Decoder snippets
 
-All decoders below tolerate both the legacy 5-element and the
-current 8-element form (per the forward-compat rule in §7).
+All decoders below tolerate the legacy 5-element form, the v0.1.4
+8-element form, and the current 9-element form (per the forward-
+compat rule in §7).
 
 ### 6.1 JavaScript (msgpack-lite)
 
@@ -283,6 +306,8 @@ function decodeTelemetry(appDataBytes) {
     announces_rebroadcast: arr[5],
     data_forwarded:        arr[6],
     inbound_packets:       arr[7],
+    // v0.1.6+ — undefined for older beacons; "" if unset on a newer one.
+    name: arr[8],
   };
 }
 ```
@@ -310,6 +335,8 @@ def decode_telemetry(app_data: bytes):
     out["announces_rebroadcast"] = arr[5] if len(arr) > 5 else None
     out["data_forwarded"]        = arr[6] if len(arr) > 6 else None
     out["inbound_packets"]       = arr[7] if len(arr) > 7 else None
+    # v0.1.6+ — operator label or auto "Rptr-XXXXXXXX" default.
+    out["name"]                  = arr[8] if len(arr) > 8 else None
     return out
 ```
 
@@ -326,6 +353,7 @@ data class Telemetry(
     val announcesRebroadcast: Long? = null,  // v0.1.4+; null for older beacons
     val dataForwarded: Long? = null,
     val inboundPackets: Long? = null,
+    val name: String? = null,                // v0.1.6+; null for older beacons
 )
 
 fun decodeTelemetry(appData: ByteArray): Telemetry? {
@@ -343,9 +371,10 @@ fun decodeTelemetry(appData: ByteArray): Telemetry? {
         val rebroadcast = if (arity > 5) u.unpackLong() else null
         val dataFwd     = if (arity > 6) u.unpackLong() else null
         val inbound     = if (arity > 7) u.unpackLong() else null
+        val name        = if (arity > 8) u.unpackString() else null
 
         val pos = if (lat != null && lon != null) Pair(lat, lon) else null
-        return Telemetry(pos, batt, routes, fwd, rebroadcast, dataFwd, inbound)
+        return Telemetry(pos, batt, routes, fwd, rebroadcast, dataFwd, inbound, name)
     }
 }
 ```

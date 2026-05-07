@@ -84,6 +84,14 @@ jobs:
         board: [ProMicroDIY, XIAO_nRF52840, RAK4631]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 = full history + tags, needed by
+          # scripts/inject_fw_version.py so `git describe --tags`
+          # can name dev / master builds (e.g. v0.1.5-3-gabcdef0).
+          # Tag-push builds also benefit — even though they read
+          # GITHUB_REF first, the depth ensures `git describe` is
+          # available as a fallback.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

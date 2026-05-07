@@ -14,7 +14,15 @@ using rns::Bytes;
 using rns::msgpack::Reader;
 using rns::msgpack::Writer;
 
-constexpr const char* FIRMWARE_VERSION = "v0.1";
+// Injected by scripts/inject_fw_version.py — git tag for tagged builds
+// (e.g. "v0.1.5"), `git describe --tags --always --dirty` for dev
+// builds (e.g. "v0.1.5-3-gabcdef0-dirty"), or "dev" if neither is
+// available. The fallback covers builds that bypass the script
+// (someone invoking the toolchain directly).
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+constexpr const char* FIRMWARE_VERSION = FW_VERSION;
 
 Bytes error_response(const char* msg) {
     Writer w;
