@@ -35,11 +35,19 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: pio test -e native_san -v
 
-  promicrodiy-build:
-    name: Firmware build — ProMicroDIY (nRF52840 + SX1262)
+  firmware-build:
+    name: Firmware build — ${{ matrix.board }} (nRF52840 + SX1262)
     runs-on: ubuntu-latest
     permissions:
       contents: write   # release-on-tag step needs to publish to GitHub Releases
+    strategy:
+      fail-fast: false   # one board failing shouldn't mask the others
+      matrix:
+        # All three are nRF52840 + SX1262 + Adafruit nRF52 bootloader,
+        # so the same UF2 family ID (0xADA52840) and conversion command
+        # work for every board. Adding RAK3401 / Heltec_T114 is just
+        # appending the env name here once their board headers are in.
+        board: [ProMicroDIY, XIAO_nRF52840, RAK4631]
     steps:
       - uses: actions/checkout@v4
 
@@ -59,13 +67,13 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      - name: Build ProMicroDIY firmware
+      - name: Build ${{ matrix.board }} firmware
         # Validates that the spec layer (src/rns/*) compiles cleanly
         # under arduino-nrf52 with exceptions+rtti enabled, and that
         # main.cpp + Radio.cpp + LoRaInterface link into a firmware
-        # binary. No hardware involvement; just verifies the build
-        # graph is intact for the bring-up target.
-        run: pio run -e ProMicroDIY
+        # binary against the per-board pin map. No hardware
+        # involvement; just verifies the build graph is intact.
+        run: pio run -e ${{ matrix.board }}
 
       - name: Convert hex to UF2
         # Family ID 0xADA52840 = "Adafruit nRF52840" — what the
@@ -79,25 +87,28 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py    -o uf2conv.py
           curl -fsSL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o uf2families.json
-          python uf2conv.py -c -f 0xADA52840 -o firmware-ProMicroDIY.uf2 .pio/build/ProMicroDIY/firmware.hex
+          python uf2conv.py -c -f 0xADA52840 -o firmware-${{ matrix.board }}.uf2 .pio/build/${{ matrix.board }}/firmware.hex
 
       - name: Upload UF2 as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-ProMicroDIY
-          path: firmware-ProMicroDIY.uf2
+          name: firmware-${{ matrix.board }}
+          path: firmware-${{ matrix.board }}.uf2
           if-no-files-found: error
 
       - name: Stage tagged release asset
         # On tag push only — copy to a versioned filename so the
-        # Release page shows e.g. firmware-ProMicroDIY-v0.1.0.uf2.
+        # Release page shows e.g. firmware-XIAO_nRF52840-v0.1.5.uf2.
         if: startsWith(github.ref, 'refs/tags/v')
-        run: cp firmware-ProMicroDIY.uf2 firmware-ProMicroDIY-${{ github.ref_name }}.uf2
+        run: cp firmware-${{ matrix.board }}.uf2 firmware-${{ matrix.board }}-${{ github.ref_name }}.uf2
 
       - name: Publish GitHub Release
+        # softprops/action-gh-release is idempotent across concurrent
+        # matrix runs targeting the same tag — the first run creates
+        # the release, subsequent ones just append their files.
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: firmware-ProMicroDIY-${{ github.ref_name }}.uf2
+          files: firmware-${{ matrix.board }}-${{ github.ref_name }}.uf2
           fail_on_unmatched_files: true
           generate_release_notes: true
