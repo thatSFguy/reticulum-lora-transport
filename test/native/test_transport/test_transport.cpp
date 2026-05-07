@@ -209,18 +209,28 @@ void test_inbound_validates_and_caches_announce() {
     TEST_ASSERT_NOT_NULL(pub);
     TEST_ASSERT_EQUAL_STRING(ALICE_PUB_KEY, pub->to_hex().c_str());
 
-    // Path entry should exist with our stub as the receiving interface
-    // and the announce wire cached. The wire has had its hops byte
-    // bumped to 1 by §2.4 inbound increment.
+    // Path entry should exist with our stub as the receiving interface.
     const auto* path = t.path_table().get(alice_dest);
     TEST_ASSERT_NOT_NULL(path);
     TEST_ASSERT_EQUAL_PTR(&iface, path->receiving_interface);
     TEST_ASSERT_EQUAL_UINT8(1, path->hops);
-    Bytes expected_cached_wire = wire;
-    expected_cached_wire[1] = 0x01;
-    TEST_ASSERT_EQUAL_STRING(expected_cached_wire.to_hex().c_str(),
-                             path->announce_wire.to_hex().c_str());
     TEST_ASSERT_EQUAL_UINT(1, path->random_blobs.size());
+
+    // §7.2 — the cached announce_wire is the form we'd RE-EMIT as a
+    // path-response: HEADER_2 with our (bob's) identity_hash as
+    // transport_id. Not a copy of the inbound HEADER_1 wire.
+    Identity bob = Identity::from_private_bytes(Bytes::from_hex(BOB_PRIV_HEX));
+    Packet cached = Packet::from_wire_bytes(path->announce_wire);
+    TEST_ASSERT_TRUE(cached.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_STRING(bob.identity_hash().to_hex().c_str(),
+                             cached.transport_id().to_hex().c_str());
+    TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH,
+                             cached.destination_hash().to_hex().c_str());
+    // Body bytes (post HEADER_2 header) match the inbound body
+    // byte-for-byte — only header form / transport_id / hops differ.
+    Packet inbound = Packet::from_wire_bytes(wire);
+    TEST_ASSERT_EQUAL_STRING(inbound.data().to_hex().c_str(),
+                             cached.data().to_hex().c_str());
 }
 
 void test_inbound_dedups_duplicate_announces() {
@@ -870,18 +880,27 @@ void test_path_request_for_known_target_emits_path_response() {
     TEST_ASSERT_EQUAL_UINT(1, req_iface.emitted.size());
     TEST_ASSERT_EQUAL_UINT(0, learn_iface.emitted.size());
 
+    // §7.2 — the path-response is HEADER_2 with our (bob's)
+    // identity_hash as transport_id, so the requester learns "send
+    // DATA *through us* to reach the destination" rather than
+    // mistakenly addressing the originator directly.
+    Identity bob = Identity::from_private_bytes(Bytes::from_hex(BOB_PRIV_HEX));
     Packet emitted = Packet::from_wire_bytes(req_iface.emitted[0]);
     TEST_ASSERT_TRUE(emitted.packet_type() == Packet::PacketType::ANNOUNCE);
+    TEST_ASSERT_TRUE(emitted.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_EQUAL_STRING(bob.identity_hash().to_hex().c_str(),
+                             emitted.transport_id().to_hex().c_str());
     TEST_ASSERT_EQUAL_UINT8(Packet::CONTEXT_PATH_RESPONSE, emitted.context());
     TEST_ASSERT_EQUAL_STRING(ALICE_DEST_HASH,
                              emitted.destination_hash().to_hex().c_str());
 
-    // Body bytes (post-context) match the cached announce — the body
-    // is the immutable signed-data carrier; only the outer context
-    // byte was mutated.
+    // Body bytes match the cached announce byte-for-byte — only the
+    // outer context byte (offset 34 in HEADER_2) was mutated.
     Bytes cached = t.path_table().get(alice_dest)->announce_wire;
     TEST_ASSERT_EQUAL_UINT(cached.size(), req_iface.emitted[0].size());
-    for (size_t i = 19; i < cached.size(); i++) {
+    constexpr size_t H2_CTX_OFFSET = 34;
+    for (size_t i = 0; i < cached.size(); i++) {
+        if (i == H2_CTX_OFFSET) continue;  // the only legal mutation
         TEST_ASSERT_EQUAL_UINT8(cached[i], req_iface.emitted[0][i]);
     }
 }

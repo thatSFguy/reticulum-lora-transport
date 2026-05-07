@@ -532,19 +532,17 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
 
 void Transport::emit_path_response(Interface* out, const PathEntry& path) {
     if (!out) return;
-    if (path.announce_wire.size() < 19) return;  // not even HEADER_1 minimum
+    // cache_validated_announce always stores the HEADER_2-with-our-id
+    // form, so the context byte is always at the HEADER_2 offset.
+    constexpr size_t H2_CTX_OFFSET = 1 + 1 + 16 + 16;
+    if (path.announce_wire.size() <= H2_CTX_OFFSET) return;
 
     Bytes wire = path.announce_wire;
 
-    // §7.2.4 — outer context byte → PATH_RESPONSE. Offset depends on
-    // header form. Signature is over body + outer dest_hash (§4.2),
-    // not context, so this mutation doesn't break validation.
-    // §2.1 — header_type is a 1-bit field at bit 6 (bit 7 is ifac_flag,
-    // not part of the header type).
-    const bool is_h2 = ((wire[0] >> 6) & 0x01) != 0;
-    const size_t ctx_offset = is_h2 ? 34 : 18;
-    if (wire.size() <= ctx_offset) return;
-    wire[ctx_offset] = Packet::CONTEXT_PATH_RESPONSE;
+    // §7.2.4 — outer context byte → PATH_RESPONSE. Signature is over
+    // body + outer dest_hash (§4.2), not context, so this mutation
+    // doesn't break validation.
+    wire[H2_CTX_OFFSET] = Packet::CONTEXT_PATH_RESPONSE;
 
     // §7.2.5 PATH_REQUEST_GRACE timing is deferred — we respond
     // immediately. transmit_now bypasses the announce-cap budget,
@@ -786,7 +784,19 @@ bool Transport::cache_validated_announce(const ValidatedAnnounce& va,
                               ? packet.transport_id()
                               : Bytes();
         e.receiving_interface = received_on;
-        e.announce_wire       = packet.wire_bytes();
+        // §7.2 — cache the wire we'd RE-EMIT as a path-response, not
+        // the wire as we received it. A path-response answers a
+        // requester who needs to send DATA *through us* to reach the
+        // destination — so the response's transport_id must be OUR
+        // identity_hash. Storing the converted form here means
+        // emit_path_response can just flip the context byte and emit;
+        // it also matches the §12.3 invariant for the rebroadcast
+        // cache (AnnounceTable).
+        const Bytes& our_id = _local.identity_hash();
+        Packet to_cache = (packet.header_type() == Packet::HeaderType::HEADER_1)
+            ? packet.originator_to_header_2(our_id)
+            : packet.replace_transport_id(our_id);
+        e.announce_wire = to_cache.wire_bytes();
         if (existing) e.random_blobs = existing->random_blobs;  // preserve window
         const bool was_new = (existing == nullptr);
         _paths.put(va.destination_hash, std::move(e));
