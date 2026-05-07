@@ -308,6 +308,27 @@ void test_inbound_rejects_malformed_packet() {
     TEST_ASSERT_EQUAL_UINT(0, t.stats().announce_validated);
 }
 
+// §2.1 — packets with the IFAC flag (bit 7) set are dropped at
+// inbound() with a discrete counter, BEFORE the parse path. We
+// don't implement IFAC; this prevents the IFAC bytes from being
+// mis-parsed downstream as part of dest_hash / transport_id.
+void test_inbound_drops_ifac_packet_with_separate_counter() {
+    Transport t(bob_identity());
+    StubInterface iface;
+    t.register_interface(&iface);
+
+    Bytes wire = Bytes::from_hex(ALICE_NO_RATCHET_WIRE);
+    wire[0] |= Packet::IFAC_FLAG_BIT;  // set bit 7
+
+    t.inbound(&iface, wire, 1000);
+
+    // Counted as IFAC drop, not as a parse failure or validated announce.
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().ifac_unsupported_drops);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().parse_failures);
+    TEST_ASSERT_EQUAL_UINT(0, t.stats().announce_validated);
+    TEST_ASSERT_EQUAL_UINT(1, t.stats().inbound_packets);
+}
+
 void test_tampered_announce_is_rejected() {
     Transport t(bob_identity());
     StubInterface iface;
@@ -1893,6 +1914,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_self_announce_is_filtered);
     RUN_TEST(test_announce_handler_fires);
     RUN_TEST(test_inbound_rejects_malformed_packet);
+    RUN_TEST(test_inbound_drops_ifac_packet_with_separate_counter);
     RUN_TEST(test_tampered_announce_is_rejected);
     RUN_TEST(test_tick_evicts_expired_paths);
     RUN_TEST(test_leaf_does_not_rebroadcast);

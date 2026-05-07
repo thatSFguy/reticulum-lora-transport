@@ -41,6 +41,13 @@ public:
     static constexpr size_t  HEADER_1_MIN_LEN  = 1 + 1 + 16 + 1;       // 19 bytes
     static constexpr size_t  HEADER_2_MIN_LEN  = 1 + 1 + 16 + 16 + 1;  // 35 bytes
 
+    // §2.1 bit 7 of the flags byte. Set by the egress side of an
+    // IFAC-protected interface; signals an `ifac_size`-byte IFAC field
+    // is appended after the hops byte. We don't implement IFAC (per
+    // memory `ifac_out_of_scope`) — `from_wire_bytes` rejects packets
+    // with this bit set so they don't mis-parse downstream.
+    static constexpr uint8_t IFAC_FLAG_BIT     = 0x80;
+
     // Parse a complete on-wire packet. Throws std::invalid_argument if
     // the buffer is shorter than the header form indicated by `flags`.
     static Packet from_wire_bytes(const Bytes& raw);
@@ -86,8 +93,12 @@ public:
     // HEADER_2.
     Packet strip_transport_id_to_header_1() const;
 
-    // §2.1 flag accessors.
-    HeaderType      header_type()      const { return static_cast<HeaderType>     ((_flags >> 6) & 0x03); }
+    // §2.1 flag accessors. header_type is a 1-bit field at bit 6;
+    // bit 7 is the separate ifac_flag (see IFAC_FLAG_BIT). Earlier
+    // revisions of the spec wrongly described header_type as a
+    // 2-bit field — see SPEC.md §2.1 erratum.
+    HeaderType      header_type()      const { return static_cast<HeaderType>     ((_flags >> 6) & 0x01); }
+    bool            ifac_flag()        const { return (_flags & IFAC_FLAG_BIT) != 0; }
     bool            context_flag()     const { return ((_flags >> 5) & 0x01) != 0; }
     TransportType   transport_type()   const { return static_cast<TransportType>  ((_flags >> 4) & 0x01); }
     DestinationType destination_type() const { return static_cast<DestinationType>((_flags >> 2) & 0x03); }

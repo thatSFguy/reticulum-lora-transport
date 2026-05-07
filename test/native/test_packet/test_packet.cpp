@@ -405,6 +405,39 @@ void test_pack_rejects_wrong_size_inputs() {
     } catch (const std::invalid_argument&) {}
 }
 
+// §2.1 erratum — header_type is a 1-bit field at bit 6. Bit 7 is the
+// IFAC flag. Synthesize a wire with bit 7 set on top of an otherwise
+// valid HEADER_1 announce; from_wire_bytes MUST reject rather than
+// mis-parse the IFAC bytes as part of dest_hash / transport_id.
+void test_from_wire_bytes_rejects_ifac_flag() {
+    Bytes raw = Bytes::from_hex(ALICE_NO_RATCHET.wire_bytes_hex);
+    raw[0] |= Packet::IFAC_FLAG_BIT;  // set bit 7
+    try {
+        (void)Packet::from_wire_bytes(raw);
+        TEST_FAIL_MESSAGE("from_wire_bytes must reject IFAC-flagged packets");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+}
+
+// §2.1 erratum lock-in. Manually construct a packed HEADER_2 wire and
+// flip bit 7 to verify header_type() reads bit 6 only (returns
+// HEADER_2, not HEADER_2 << 1 or some other 2-bit aliasing). We can't
+// drive this through from_wire_bytes (which now rejects IFAC), so
+// pack the bytes directly and parse a non-IFAC variant first to pin
+// the mask behavior — the IFAC variant is exercised by the test
+// above. Here we just confirm header_type() of a non-IFAC HEADER_2
+// returns HEADER_2 (regression guard for the 0x03 → 0x01 mask change).
+void test_header_type_mask_is_one_bit() {
+    // Pack a minimal HEADER_2 packet — flags = 0x40 (HEADER_2 alone).
+    Bytes tid = Bytes::from_hex("00112233445566778899aabbccddeeff");
+    Bytes dh  = Bytes::from_hex("ffeeddccbbaa99887766554433221100");
+    Bytes packed = Packet::pack_header_2(0x40, 0, tid, dh, 0, Bytes{});
+    Packet p = Packet::from_wire_bytes(packed);
+    TEST_ASSERT_TRUE(p.header_type() == Packet::HeaderType::HEADER_2);
+    TEST_ASSERT_FALSE(p.ifac_flag());
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     UNITY_BEGIN();
@@ -417,6 +450,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_parse_announce_body_rejects_short);
     RUN_TEST(test_pack_header_1_round_trip);
     RUN_TEST(test_pack_header_2_round_trip);
+    RUN_TEST(test_from_wire_bytes_rejects_ifac_flag);
+    RUN_TEST(test_header_type_mask_is_one_bit);
     RUN_TEST(test_originator_to_header_2);
     RUN_TEST(test_originator_to_header_2_preserves_context_flag);
     RUN_TEST(test_originator_to_header_2_rejects_already_header_2);

@@ -237,6 +237,7 @@ public:
     struct Stats {
         uint64_t inbound_packets        = 0;
         uint64_t parse_failures         = 0;
+        uint64_t ifac_unsupported_drops = 0;  // §2.1 bit 7 set; we don't implement IFAC
         uint64_t dedup_drops            = 0;
         uint64_t self_announce_drops    = 0;
         uint64_t announce_validated     = 0;

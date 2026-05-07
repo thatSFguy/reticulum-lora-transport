@@ -169,6 +169,17 @@ void Transport::drive_announce_rebroadcast(uint64_t now_ms) {
 void Transport::inbound(Interface* received_on, const Bytes& wire, uint64_t now_ms) {
     _stats.inbound_packets++;
 
+    // §2.1 IFAC drop. Bit 7 of the flags byte signals an
+    // ifac_size-byte IFAC field appended after the hops byte;
+    // without IFAC support we'd misparse downstream offsets
+    // (dest_hash / transport_id) and fail signature verification.
+    // Reject early so this counter distinguishes IFAC drops from
+    // genuine parse failures.
+    if (!wire.empty() && (wire[0] & Packet::IFAC_FLAG_BIT)) {
+        _stats.ifac_unsupported_drops++;
+        return;
+    }
+
     // §2.4 — increment hops to count the hop just taken (matches
     // upstream Transport.inbound:1395). Mutate a copy of the wire so
     // every downstream consumer sees the post-bump value (path_table
@@ -528,7 +539,9 @@ void Transport::emit_path_response(Interface* out, const PathEntry& path) {
     // §7.2.4 — outer context byte → PATH_RESPONSE. Offset depends on
     // header form. Signature is over body + outer dest_hash (§4.2),
     // not context, so this mutation doesn't break validation.
-    const bool is_h2 = ((wire[0] >> 6) & 0x03) != 0;
+    // §2.1 — header_type is a 1-bit field at bit 6 (bit 7 is ifac_flag,
+    // not part of the header type).
+    const bool is_h2 = ((wire[0] >> 6) & 0x01) != 0;
     const size_t ctx_offset = is_h2 ? 34 : 18;
     if (wire.size() <= ctx_offset) return;
     wire[ctx_offset] = Packet::CONTEXT_PATH_RESPONSE;

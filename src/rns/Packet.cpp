@@ -8,6 +8,16 @@ Packet Packet::from_wire_bytes(const Bytes& raw) {
     if (raw.size() < HEADER_1_MIN_LEN) {
         throw std::invalid_argument("Packet::from_wire_bytes: shorter than HEADER_1 minimum");
     }
+    // §2.1 bit 7 = ifac_flag. An IFAC field would be appended after the
+    // hops byte (between byte 2 and the start of addresses), shifting
+    // all downstream offsets. We don't implement IFAC; rejecting here
+    // avoids misparsing the IFAC bytes as part of the dest_hash /
+    // transport_id and getting a garbled body that fails signature
+    // verification several layers later.
+    if (raw[0] & IFAC_FLAG_BIT) {
+        throw std::invalid_argument(
+            "Packet::from_wire_bytes: IFAC-flagged packets not supported (bit 7 set)");
+    }
 
     Packet p;
     p._raw    = raw;
