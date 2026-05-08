@@ -285,6 +285,25 @@ void setup() {
         Serial.println();
     });
 
+    // Surface every path-table eviction with the timing info that
+    // makes premature evictions obvious. `delta_ms` is signed:
+    //   negative → entry was evicted BEFORE its stated TTL (bug)
+    //   zero/positive → entry was past TTL (correct eviction)
+    // Field 2026-05-08: caught a 9de44e52 entry going missing ~5 min
+    // before TTL with no obvious cause; this hook will pin it.
+    g_transport->set_path_evict_observer(
+        [](const std::string& dest_hex, uint64_t expires_ms, uint64_t now_ms) {
+            const int64_t delta = static_cast<int64_t>(now_ms) - static_cast<int64_t>(expires_ms);
+            Serial.print("rlr: evict ");
+            Serial.print(dest_hex.c_str());
+            Serial.print("  expires_ms=");
+            Serial.print(static_cast<unsigned long>(expires_ms));
+            Serial.print("  now_ms=");
+            Serial.print(static_cast<unsigned long>(now_ms));
+            Serial.print("  delta_ms=");
+            Serial.println(static_cast<long>(delta));
+        });
+
     // Surface every path-table insert/update on Serial so the operator
     // can watch the routing table grow as announces arrive. The first
     // 8 hex chars of the destination_hash are enough to disambiguate

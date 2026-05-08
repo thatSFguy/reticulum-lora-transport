@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -64,8 +65,12 @@ public:
     bool note_random_blob(const Bytes& dest_hash, const Bytes& blob);
 
     // §12.4.2 — drop entries whose `expires_ms` is past `now_ms`.
-    // Returns the count removed.
-    size_t evict_expired(uint64_t now_ms);
+    // Returns the count removed. The optional `on_evict` callback fires
+    // once per removed entry with (dest_hash_hex, expires_ms, now_ms);
+    // debug builds use it to surface premature evictions on the serial
+    // log. Pass nullptr (default) to disable.
+    using EvictObserverFn = std::function<void(const std::string&, uint64_t, uint64_t)>;
+    size_t evict_expired(uint64_t now_ms, EvictObserverFn on_evict = nullptr);
 
     size_t size() const { return _entries.size(); }
     bool   empty() const { return _entries.empty(); }

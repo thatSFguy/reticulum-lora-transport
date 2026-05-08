@@ -41,10 +41,11 @@ bool PathTable::note_random_blob(const Bytes& dest_hash, const Bytes& blob) {
     return true;
 }
 
-size_t PathTable::evict_expired(uint64_t now_ms) {
+size_t PathTable::evict_expired(uint64_t now_ms, EvictObserverFn on_evict) {
     size_t removed = 0;
     for (auto it = _entries.begin(); it != _entries.end(); ) {
         if (it->second.expires_ms <= now_ms) {
+            if (on_evict) on_evict(it->first, it->second.expires_ms, now_ms);
             it = _entries.erase(it);
             removed++;
         } else {

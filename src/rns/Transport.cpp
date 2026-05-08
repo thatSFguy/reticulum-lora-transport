@@ -135,7 +135,7 @@ void Transport::tick(uint64_t now_ms) {
     drive_announce_rebroadcast(now_ms);
     drive_scheduled_announces(now_ms);
     for (Interface* i : _interfaces) i->tick(now_ms);
-    _paths.evict_expired(now_ms);
+    _paths.evict_expired(now_ms, _evict_observer);
     _reverse_table.evict_aged(now_ms);
     _link_table.evict_unproven(now_ms);
     _link_table.evict_stale(now_ms, LINK_STALE_THRESHOLD_MS);

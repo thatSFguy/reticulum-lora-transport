@@ -208,6 +208,13 @@ public:
     // out-of-band. Setting nullptr (default) disables the hook.
     void set_drop_observer(DropObserverFn fn) { _drop_observer = std::move(fn); }
 
+    // Optional observer fired on every path-table eviction during
+    // tick(). Debug-only — exists to confirm whether `evict_expired`
+    // is removing entries before their stated TTL. Callback receives
+    // (dest_hash_hex, expires_ms, now_ms); for a correct eviction
+    // expires_ms <= now_ms.
+    void set_path_evict_observer(PathTable::EvictObserverFn fn) { _evict_observer = std::move(fn); }
+
     // Build and emit an announce for a registered local destination.
     // Returns true if emitted, false if the dest_hash isn't local or
     // the announce_seed_fn isn't set.
@@ -338,6 +345,7 @@ private:
     PathObserverFn _path_observer;
     TxObserverFn   _tx_observer;
     DropObserverFn _drop_observer;
+    PathTable::EvictObserverFn _evict_observer;
 
     struct ScheduledAnnounce {
         Bytes           dest_hash;
