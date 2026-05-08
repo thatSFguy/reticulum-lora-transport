@@ -90,6 +90,29 @@ enum class TxKind : uint8_t {
 };
 using TxObserverFn = std::function<void(TxKind)>;
 
+// Optional silent-drop observer. Used by the firmware-side debug
+// instrumentation to surface link/data drop sites that would
+// otherwise only tick a stat counter. The hook fires after the
+// counter has incremented, with the relevant subject hash where
+// available (link_id / dest_hash) — empty Bytes() if not.
+enum class DropKind : uint8_t {
+    LrNotHeader2,        // LR received but not HEADER_2
+    LrNotForUs,          // LR transport_id != _local.identity_hash()
+    LrNoPath,            // LR for destination we don't have a path for
+    LrPathLocal,         // path->hops == 0 (dead-code branch — should never fire)
+    LrComputeFailed,     // compute_relay_forward returned nullopt
+    LrpUnknownLink,      // LRPROOF for unknown link_id
+    LrpWrongIface,       // LRPROOF on wrong direction
+    LrpBodySize,         // LRPROOF body size invalid
+    LrpNoPubkey,         // No cached responder public_key
+    LrpSigFail,          // Signature verification failed
+    LrpNoRcvdIf,         // entry->rcvd_if is null
+    LinkDataUnknown,     // Link DATA for unknown link
+    LinkDataUnvalidated, // Link DATA before LRPROOF validated the link
+    LinkDataWrongIface,  // Link DATA on neither rcvd_if nor nh_if
+};
+using DropObserverFn = std::function<void(DropKind, const Bytes& subject)>;
+
 class Transport {
 public:
     // The local node's identity. Required for self-announce filtering
@@ -169,6 +192,13 @@ public:
     // is otherwise indistinguishable in the radio-layer log. Setting
     // nullptr (default) disables the hook.
     void set_tx_observer(TxObserverFn fn) { _tx_observer = std::move(fn); }
+
+    // Optional observer fired on every silent drop in the LR / LRPROOF
+    // / Link DATA paths (i.e. a stat counter incremented but no other
+    // visible side effect). Debug builds use this to make the failure
+    // mode visible on the serial log instead of having to dump stats
+    // out-of-band. Setting nullptr (default) disables the hook.
+    void set_drop_observer(DropObserverFn fn) { _drop_observer = std::move(fn); }
 
     // Build and emit an announce for a registered local destination.
     // Returns true if emitted, false if the dest_hash isn't local or
@@ -299,6 +329,7 @@ private:
     AnnounceSeedFn _announce_seed_fn;
     PathObserverFn _path_observer;
     TxObserverFn   _tx_observer;
+    DropObserverFn _drop_observer;
 
     struct ScheduledAnnounce {
         Bytes           dest_hash;

@@ -244,6 +244,39 @@ void setup() {
         Serial.println(tag);
     });
 
+    // Surface every silent drop in the LR / LRPROOF / Link DATA paths.
+    // The transport-layer counter is incremented at each site; this
+    // observer makes the cause visible on the serial log so we can
+    // tell the difference between "T didn't see the LR at all" and
+    // "T saw it but dropped because <reason>". Subject hash is the
+    // link_id / dest_hash / transport_id depending on the drop site.
+    g_transport->set_drop_observer([](rns::DropKind k, const rns::Bytes& subject) {
+        const char* tag = "?";
+        switch (k) {
+            case rns::DropKind::LrNotHeader2:        tag = "lr-not-h2";          break;
+            case rns::DropKind::LrNotForUs:          tag = "lr-not-for-us";      break;
+            case rns::DropKind::LrNoPath:            tag = "lr-no-path";         break;
+            case rns::DropKind::LrPathLocal:         tag = "lr-path-local";      break;
+            case rns::DropKind::LrComputeFailed:     tag = "lr-compute-failed";  break;
+            case rns::DropKind::LrpUnknownLink:      tag = "lrp-unknown-link";   break;
+            case rns::DropKind::LrpWrongIface:       tag = "lrp-wrong-iface";    break;
+            case rns::DropKind::LrpBodySize:         tag = "lrp-body-size";      break;
+            case rns::DropKind::LrpNoPubkey:         tag = "lrp-no-pubkey";      break;
+            case rns::DropKind::LrpSigFail:          tag = "lrp-sig-fail";       break;
+            case rns::DropKind::LrpNoRcvdIf:         tag = "lrp-no-rcvd-if";     break;
+            case rns::DropKind::LinkDataUnknown:     tag = "ld-unknown";         break;
+            case rns::DropKind::LinkDataUnvalidated: tag = "ld-unvalidated";     break;
+            case rns::DropKind::LinkDataWrongIface:  tag = "ld-wrong-iface";     break;
+        }
+        Serial.print("rlr: drop ");
+        Serial.print(tag);
+        if (!subject.empty()) {
+            Serial.print("  ");
+            Serial.print(subject.to_hex().c_str());
+        }
+        Serial.println();
+    });
+
     // Surface every path-table insert/update on Serial so the operator
     // can watch the routing table grow as announces arrive. The first
     // 8 hex chars of the destination_hash are enough to disambiguate

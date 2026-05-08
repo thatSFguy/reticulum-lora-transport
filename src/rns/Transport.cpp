@@ -570,15 +570,30 @@ void Transport::handle_link_request_forward(Interface* received_on,
                                             uint64_t now_ms) {
     // §12.2 entry conditions, same as DATA forwarding: HEADER_2 with
     // our identity_hash as transport_id, and a path entry exists.
-    if (packet.header_type() != Packet::HeaderType::HEADER_2) return;
-    if (packet.transport_id() != _local.identity_hash())     return;
+    if (packet.header_type() != Packet::HeaderType::HEADER_2) {
+        if (_drop_observer) _drop_observer(DropKind::LrNotHeader2, packet.destination_hash());
+        return;
+    }
+    if (packet.transport_id() != _local.identity_hash()) {
+        if (_drop_observer) _drop_observer(DropKind::LrNotForUs, packet.transport_id());
+        return;
+    }
 
     const PathEntry* path = _paths.get(packet.destination_hash());
-    if (!path) return;
-    if (path->hops == 0) return;  // local responder — TBD
+    if (!path) {
+        if (_drop_observer) _drop_observer(DropKind::LrNoPath, packet.destination_hash());
+        return;
+    }
+    if (path->hops == 0) {
+        if (_drop_observer) _drop_observer(DropKind::LrPathLocal, packet.destination_hash());
+        return;  // local responder — TBD
+    }
 
     auto fwd = compute_relay_forward(packet, *path);
-    if (!fwd) return;
+    if (!fwd) {
+        if (_drop_observer) _drop_observer(DropKind::LrComputeFailed, packet.destination_hash());
+        return;
+    }
 
     // §6.6 / §12.2.4 — clamp signalling MTU in place if the outbound
     // interface can't carry the requested value. Done BEFORE emit so
@@ -619,6 +634,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
     const LinkEntry* entry = _link_table.get(packet.destination_hash());
     if (!entry) {
         _stats.link_proofs_unknown_link++;
+        if (_drop_observer) _drop_observer(DropKind::LrpUnknownLink, packet.destination_hash());
         return;
     }
     if (entry->nh_if != received_on) {
@@ -626,6 +642,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
         // (nh_if). Anything else is a spoof; drop without consuming
         // the entry (peek-then-pop).
         _stats.link_proofs_wrong_iface++;
+        if (_drop_observer) _drop_observer(DropKind::LrpWrongIface, packet.destination_hash());
         return;
     }
 
@@ -634,6 +651,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
     const Bytes& body = packet.data();
     if (body.size() != 96 && body.size() != 99) {
         _stats.link_proofs_invalid++;
+        if (_drop_observer) _drop_observer(DropKind::LrpBodySize, packet.destination_hash());
         return;
     }
     Bytes signature       = body.slice(0, 64);
@@ -645,6 +663,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
     const Bytes* responder_pub = public_key_for(entry->dst_hash);
     if (!responder_pub || responder_pub->size() != Identity::PUB_KEY_LEN) {
         _stats.link_proofs_invalid++;
+        if (_drop_observer) _drop_observer(DropKind::LrpNoPubkey, entry->dst_hash);
         return;
     }
     Bytes responder_ed_pub = responder_pub->slice(32, 32);
@@ -657,6 +676,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
     if (!crypto::ed25519_verify(responder_ed_pub, signature,
                                 signed_data.data(), signed_data.size())) {
         _stats.link_proofs_invalid++;
+        if (_drop_observer) _drop_observer(DropKind::LrpSigFail, packet.destination_hash());
         return;
     }
 
@@ -665,6 +685,7 @@ void Transport::handle_link_proof_forward(Interface* received_on,
     Interface* fwd = entry->rcvd_if;
     if (!fwd) {
         _stats.link_proofs_invalid++;
+        if (_drop_observer) _drop_observer(DropKind::LrpNoRcvdIf, packet.destination_hash());
         return;
     }
     if (_tx_observer) _tx_observer(TxKind::LinkForward);
@@ -686,11 +707,13 @@ void Transport::handle_link_data_forward(Interface* received_on,
     const LinkEntry* entry = _link_table.get(packet.destination_hash());
     if (!entry) {
         _stats.link_data_unknown_link++;
+        if (_drop_observer) _drop_observer(DropKind::LinkDataUnknown, packet.destination_hash());
         return;
     }
     if (!entry->validated) {
         // §12.5.2 implicit — pre-LRPROOF Link DATA shouldn't exist.
         _stats.link_data_unvalidated++;
+        if (_drop_observer) _drop_observer(DropKind::LinkDataUnvalidated, packet.destination_hash());
         return;
     }
 
@@ -698,7 +721,10 @@ void Transport::handle_link_data_forward(Interface* received_on,
     Interface* fwd = nullptr;
     if (received_on == entry->rcvd_if)      fwd = entry->nh_if;
     else if (received_on == entry->nh_if)   fwd = entry->rcvd_if;
-    if (!fwd) return;  // arrived on a third interface — drop silently
+    if (!fwd) {
+        if (_drop_observer) _drop_observer(DropKind::LinkDataWrongIface, packet.destination_hash());
+        return;  // arrived on a third interface — drop silently
+    }
 
     if (_tx_observer) _tx_observer(TxKind::LinkForward);
     fwd->transmit_now(packet.wire_bytes());
