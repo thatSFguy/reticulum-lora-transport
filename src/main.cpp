@@ -267,6 +267,14 @@ void setup() {
             case rns::DropKind::LinkDataUnknown:     tag = "ld-unknown";         break;
             case rns::DropKind::LinkDataUnvalidated: tag = "ld-unvalidated";     break;
             case rns::DropKind::LinkDataWrongIface:  tag = "ld-wrong-iface";     break;
+            case rns::DropKind::DataNoPath:          tag = "data-no-path";       break;
+            case rns::DropKind::DataPathLocal:       tag = "data-path-local";    break;
+            case rns::DropKind::DataComputeFailed:   tag = "data-compute-failed"; break;
+            case rns::DropKind::PrTooShort:          tag = "pr-too-short";       break;
+            case rns::DropKind::PrTagless:           tag = "pr-tagless";         break;
+            case rns::DropKind::PrDedup:             tag = "pr-dedup";           break;
+            case rns::DropKind::PrLocalNoSeed:       tag = "pr-local-no-seed";   break;
+            case rns::DropKind::PrUnanswered:        tag = "pr-unanswered";      break;
         }
         Serial.print("rlr: drop ");
         Serial.print(tag);

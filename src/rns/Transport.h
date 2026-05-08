@@ -110,6 +110,14 @@ enum class DropKind : uint8_t {
     LinkDataUnknown,     // Link DATA for unknown link
     LinkDataUnvalidated, // Link DATA before LRPROOF validated the link
     LinkDataWrongIface,  // Link DATA on neither rcvd_if nor nh_if
+    DataNoPath,          // §12.2 DATA via us, but no path for the destination
+    DataPathLocal,       // §12.2 DATA via us, path->hops == 0 (dead-code branch)
+    DataComputeFailed,   // §12.2 DATA via us, compute_relay_forward returned nullopt
+    PrTooShort,          // §7.2 path-request body < 16 bytes
+    PrTagless,           // §7.2 path-request body == 16 bytes (no tag)
+    PrDedup,             // §7.2 path-request target+tag already in _pr_tags
+    PrLocalNoSeed,       // §7.2 path-request for our local destination but no announce seed
+    PrUnanswered,        // §7.2 path-request fell through every branch
 };
 using DropObserverFn = std::function<void(DropKind, const Bytes& subject)>;
 

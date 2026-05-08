@@ -371,11 +371,19 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
 
     // §12.2 entry: HEADER_2 packet whose transport_id is us, AND we
     // have a path entry for the destination.
+    //
+    // The header-type and transport-id mismatches are silent on
+    // purpose — every opportunistic DATA we overhear matches one of
+    // them, and surfacing them would flood the log. Only instrument
+    // the cases where we WERE addressed via us but couldn't relay.
     if (packet.header_type() != Packet::HeaderType::HEADER_2) return;
     if (packet.transport_id() != _local.identity_hash())     return;
 
     const PathEntry* path = _paths.get(packet.destination_hash());
-    if (!path) return;
+    if (!path) {
+        if (_drop_observer) _drop_observer(DropKind::DataNoPath, packet.destination_hash());
+        return;
+    }
 
     if (path->hops == 0) {
         // §12.2.3 — local destination. Hand-off to local Destination
@@ -383,11 +391,15 @@ void Transport::handle_data_forward(Interface* received_on, const Packet& packet
         // Transport. No reverse_table entry here — PROOF for a local
         // destination would be locally generated, not forwarded.
         _stats.data_local_arrived++;
+        if (_drop_observer) _drop_observer(DropKind::DataPathLocal, packet.destination_hash());
         return;
     }
 
     auto fwd = compute_relay_forward(packet, *path);
-    if (!fwd) return;
+    if (!fwd) {
+        if (_drop_observer) _drop_observer(DropKind::DataComputeFailed, packet.destination_hash());
+        return;
+    }
     if (_tx_observer) _tx_observer(TxKind::DataForward);
     fwd->outbound_if->transmit_now(fwd->wire);
 
@@ -441,7 +453,10 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     //   33+   bytes:  target(16) || transport_id(16) || tag(rest)  — transport originator
     // Tagless requests (exactly 16 bytes) are dropped per spec.
     const Bytes& body = packet.data();
-    if (body.size() < 16) return;
+    if (body.size() < 16) {
+        if (_drop_observer) _drop_observer(DropKind::PrTooShort, Bytes{});
+        return;
+    }
 
     Bytes target = body.slice(0, 16);
     Bytes tag;
@@ -456,6 +471,7 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     }
     if (tag.size() == 0) {
         _stats.path_requests_tagless++;
+        if (_drop_observer) _drop_observer(DropKind::PrTagless, target);
         return;
     }
 
@@ -469,6 +485,7 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     dedup_key.append(tag);
     if (!_pr_tags.insert(dedup_key)) {
         _stats.path_requests_deduped++;
+        if (_drop_observer) _drop_observer(DropKind::PrDedup, target);
         return;
     }
 
@@ -479,6 +496,7 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     if (is_local_destination(target)) {
         if (!_announce_seed_fn) {
             _stats.path_requests_local_no_seed++;
+            if (_drop_observer) _drop_observer(DropKind::PrLocalNoSeed, target);
             return;
         }
         // app_data is empty for path-response in this slice. Telemetry
@@ -528,6 +546,7 @@ void Transport::handle_path_request(Interface* received_on, const Packet& packet
     // §7.2.3 branch 5 — leaf, or transport-enabled with no other
     // interface to forward to.
     _stats.path_requests_unanswered++;
+    if (_drop_observer) _drop_observer(DropKind::PrUnanswered, target);
 }
 
 void Transport::emit_path_response(Interface* out, const PathEntry& path) {
